@@ -2,6 +2,20 @@ node_modules/
 dist/
 release/
 qa/
+coverage/
+out/
+installer/
+
+# Local secrets and machine-specific credentials
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.pfx
+*.p12
+
 *.log
 *.tsbuildinfo
 .DS_Store
