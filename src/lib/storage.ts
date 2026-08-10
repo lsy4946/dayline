@@ -15,7 +15,7 @@ function browserSeed(): DaylineStore {
       {
         id: makeId(),
         title: 'Dayline 프로토타입 살펴보기',
-        note: '한 번 누르면 완료, 완료된 일정을 다시 누르면 최근 삭제로 이동해요.',
+        note: '활성 일정은 우클릭하면 비활성, 비활성 일정은 다시 우클릭하면 최근 삭제로 이동해요.',
         dueDate: todayKey(),
         dueTime: null,
         color: 'coral',
@@ -43,7 +43,7 @@ function browserSeed(): DaylineStore {
       {
         id: makeId(),
         title: '오프라인 저장 동작 확인',
-        note: '완료 상태도 앱을 다시 열었을 때 그대로 유지됩니다.',
+        note: '비활성 상태도 앱을 다시 열었을 때 그대로 유지됩니다.',
         dueDate: todayKey(),
         dueTime: null,
         color: 'sage',

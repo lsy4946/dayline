@@ -43,7 +43,7 @@ body[data-mode="main"]::before {
   top: 0;
   left: 0;
   right: 138px;
-  height: 44px;
+  height: 36px;
   -webkit-app-region: drag;
   pointer-events: auto;
 }
@@ -185,7 +185,7 @@ button:disabled {
   grid-template-columns: 78px minmax(620px, 1fr) 354px;
   width: 100%;
   height: 100%;
-  padding-top: 44px;
+  padding-top: 36px;
   background: var(--paper);
 }
 
@@ -848,22 +848,6 @@ button:disabled {
   font-weight: 800;
 }
 
-.task-row-actions {
-  display: flex;
-  align-items: center;
-  width: 0;
-  overflow: hidden;
-  opacity: 0;
-  transition: width 170ms ease, opacity 130ms ease;
-}
-
-.task-row:hover .task-row-actions,
-.task-row:focus-within .task-row-actions {
-  width: 67px;
-  padding-right: 5px;
-  opacity: 1;
-}
-
 .task-row.is-completed {
   border-color: #e2e5e2;
   background: #f5f6f4;
@@ -1000,6 +984,180 @@ button:disabled {
 }
 
 .task-modal form { padding: 20px 25px 24px; }
+.task-state-card {
+  margin-bottom: 18px;
+  padding: 13px;
+  border: 1px solid #dde4de;
+  border-radius: 15px;
+  background: #f7f9f6;
+}
+
+.task-state-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.task-state-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-state-heading span {
+  color: #4d5b54;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.task-state-heading small {
+  color: #909a94;
+  font-size: 9px;
+}
+
+.task-state-heading strong {
+  padding: 4px 8px;
+  border-radius: 7px;
+  font-size: 9px;
+  font-weight: 850;
+}
+
+.task-state-heading strong.is-active {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.task-state-heading strong.is-inactive {
+  background: #e8ebe8;
+  color: #77817c;
+}
+
+.task-state-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 7px;
+}
+
+.task-state-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid #d9e0da;
+  border-radius: 10px;
+  background: white;
+  color: #75817a;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.task-state-controls button:hover { border-color: #b9c8be; color: var(--green); }
+.task-state-controls button.is-selected {
+  border-color: #8eb29f;
+  background: var(--green-soft);
+  color: var(--green);
+  box-shadow: inset 0 0 0 1px rgba(37, 95, 75, 0.08);
+}
+
+.task-state-controls .task-remove-button {
+  border-color: #f0c9c2;
+  background: #fff5f3;
+  color: #b54e42;
+}
+
+.task-state-controls .task-remove-button:hover {
+  border-color: #e4a89e;
+  background: #ffede9;
+  color: #9f3d32;
+}
+
+.delete-confirm-backdrop {
+  position: fixed;
+  z-index: 380;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(29, 38, 33, 0.38);
+  backdrop-filter: blur(5px);
+  animation: fade-in 130ms ease both;
+}
+
+.delete-confirm-dialog {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 13px;
+  width: min(390px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 18px;
+  background: #fffdfc;
+  box-shadow: 0 24px 70px rgba(42, 30, 27, 0.28);
+  animation: modal-up 160ms ease both;
+}
+
+.delete-confirm-icon {
+  display: grid;
+  place-items: center;
+  width: 39px;
+  height: 39px;
+  border-radius: 12px;
+  background: #ffebe7;
+  color: #ad493e;
+}
+
+.delete-confirm-dialog h3 {
+  margin: 1px 0 6px;
+  color: var(--ink);
+  font-size: 16px;
+  letter-spacing: -0.025em;
+}
+
+.delete-confirm-dialog p {
+  margin: 0;
+  color: #78827c;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.delete-confirm-dialog p strong {
+  color: #5e6862;
+  font-weight: 800;
+}
+
+.delete-confirm-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.delete-confirm-actions button {
+  min-width: 70px;
+  min-height: 40px;
+}
+
+.delete-confirm-button {
+  border: 1px solid #ba5145;
+  border-radius: 11px;
+  background: #b95044;
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.delete-confirm-button:hover {
+  border-color: #a33f34;
+  background: #a94439;
+}
+
 .field-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 17px; }
 .field-label {
   display: flex;

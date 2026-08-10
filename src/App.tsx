@@ -2,18 +2,15 @@ import {
   ArchiveRestore,
   CalendarDays,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
-  Edit3,
   GripHorizontal,
   History,
   LayoutGrid,
   Lock,
   Maximize2,
   MonitorUp,
-  MoreHorizontal,
   Pin,
   PinOff,
   Plus,
@@ -49,13 +46,13 @@ import {
   weekDaysAround,
 } from './domain/date'
 import {
+  advanceTaskState,
   deletedTasks,
   remainingRetentionDays,
-  reopenTask,
   restoreTask,
+  setTaskCompleted,
   softDeleteTask,
   sortTasks,
-  transitionTask,
   visibleTasks,
 } from './domain/tasks'
 import { loadStore, saveStore, subscribeToStore } from './lib/storage'
@@ -181,17 +178,36 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
   )
 }
 
-function TaskChip({ task, onActivate }: { task: Task; onActivate: (id: string) => void }) {
+function TaskChip({
+  task,
+  onOpen,
+  onSecondaryAction,
+}: {
+  task: Task
+  onOpen: (task: Task) => void
+  onSecondaryAction: (id: string) => void
+}) {
   return (
     <button
       type="button"
       className={`task-chip color-${task.color} ${task.completed ? 'is-completed' : ''}`}
       onClick={(event) => {
         event.stopPropagation()
-        onActivate(task.id)
+        onOpen(task)
       }}
-      title={`${task.title}${task.completed ? ' · 완료됨, 다시 누르면 최근 삭제로 이동' : ' · 눌러서 완료'}`}
-      aria-label={`${task.title}${task.completed ? ', 완료됨. 다시 누르면 최근 삭제로 이동' : ', 진행 중. 누르면 완료'}`}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onSecondaryAction(task.id)
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+        event.preventDefault()
+        event.stopPropagation()
+        onSecondaryAction(task.id)
+      }}
+      title={`${task.title} · 좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
+      aria-label={`${task.title}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
     >
       <span className="task-chip-dot">{task.completed && <Check size={9} strokeWidth={3} />}</span>
       {task.dueTime && <span className="task-chip-time">{task.dueTime}</span>}
@@ -202,26 +218,34 @@ function TaskChip({ task, onActivate }: { task: Task; onActivate: (id: string) =
 
 function TaskRow({
   task,
-  onActivate,
-  onEdit,
-  onDelete,
-  onReopen,
+  onOpen,
+  onSecondaryAction,
   compact = false,
 }: {
   task: Task
-  onActivate: (id: string) => void
-  onEdit?: (task: Task) => void
-  onDelete?: (id: string) => void
-  onReopen?: (id: string) => void
+  onOpen: (task: Task) => void
+  onSecondaryAction: (id: string) => void
   compact?: boolean
 }) {
   return (
-    <article className={`task-row color-${task.color} ${task.completed ? 'is-completed' : ''} ${compact ? 'is-compact' : ''}`}>
+    <article
+      className={`task-row color-${task.color} ${task.completed ? 'is-completed' : ''} ${compact ? 'is-compact' : ''}`}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        onSecondaryAction(task.id)
+      }}
+    >
       <button
         type="button"
         className="task-row-main"
-        onClick={() => onActivate(task.id)}
-        aria-label={`${task.title}${task.completed ? ', 완료됨. 다시 누르면 최근 삭제로 이동' : ', 누르면 완료'}`}
+        onClick={() => onOpen(task)}
+        onKeyDown={(event) => {
+          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+          event.preventDefault()
+          onSecondaryAction(task.id)
+        }}
+        aria-label={`${task.title}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
+        title={`좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
       >
         <span className="task-status" aria-hidden="true">
           {task.completed ? <Check size={13} strokeWidth={3} /> : <span />}
@@ -236,29 +260,10 @@ function TaskRow({
             ) : (
               '시간 없음'
             )}
-            {task.completed && <span className="completed-label">완료됨</span>}
+            {task.completed && <span className="completed-label">비활성</span>}
           </span>
         </span>
       </button>
-      {!compact && (
-        <div className="task-row-actions">
-          {task.completed && onReopen && (
-            <IconButton label="미완료로 되돌리기" onClick={() => onReopen(task.id)}>
-              <RotateCcw size={15} />
-            </IconButton>
-          )}
-          {onEdit && (
-            <IconButton label="일정 편집" onClick={() => onEdit(task)}>
-              <Edit3 size={15} />
-            </IconButton>
-          )}
-          {onDelete && (
-            <IconButton label="최근 삭제로 이동" onClick={() => onDelete(task.id)}>
-              <Trash2 size={15} />
-            </IconButton>
-          )}
-        </div>
-      )}
     </article>
   )
 }
@@ -286,12 +291,14 @@ function TaskModal({
   task,
   onClose,
   onSave,
+  onDelete,
 }: {
   open: boolean
   initialDate: string
   task: Task | null
   onClose: () => void
-  onSave: (draft: TaskDraft, taskId?: string) => void
+  onSave: (draft: TaskDraft, taskId?: string, completed?: boolean) => void
+  onDelete: (id: string) => void
 }) {
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
@@ -299,6 +306,8 @@ function TaskModal({
   const [timeEnabled, setTimeEnabled] = useState(false)
   const [dueTime, setDueTime] = useState('09:00')
   const [color, setColor] = useState<TaskColor>('coral')
+  const [completed, setCompleted] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -309,6 +318,8 @@ function TaskModal({
     setTimeEnabled(Boolean(task?.dueTime))
     setDueTime(task?.dueTime ?? '09:00')
     setColor(task?.color ?? 'coral')
+    setCompleted(task?.completed ?? false)
+    setConfirmDelete(false)
     const timer = window.setTimeout(() => titleInputRef.current?.focus(), 90)
     return () => window.clearTimeout(timer)
   }, [open, task, initialDate])
@@ -316,11 +327,13 @@ function TaskModal({
   useEffect(() => {
     if (!open) return
     const handleKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key !== 'Escape') return
+      if (confirmDelete) setConfirmDelete(false)
+      else onClose()
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [open, onClose])
+  }, [confirmDelete, open, onClose])
 
   if (!open) return null
 
@@ -336,6 +349,7 @@ function TaskModal({
         color,
       },
       task?.id,
+      task ? completed : undefined,
     )
   }
 
@@ -356,8 +370,8 @@ function TaskModal({
       >
         <header className="modal-header">
           <div>
-            <span className="eyebrow">{task ? 'EDIT SCHEDULE' : 'NEW SCHEDULE'}</span>
-            <h2 id="task-modal-title">{task ? '일정 다듬기' : '새 일정 만들기'}</h2>
+            <span className="eyebrow">{task ? 'SCHEDULE DETAILS' : 'NEW SCHEDULE'}</span>
+            <h2 id="task-modal-title">{task ? '일정 상세 및 수정' : '새 일정 만들기'}</h2>
           </div>
           <IconButton label="닫기" onClick={onClose}>
             <X size={19} />
@@ -365,6 +379,45 @@ function TaskModal({
         </header>
 
         <form onSubmit={submit}>
+          {task && (
+            <section className="task-state-card" aria-label="일정 상태 관리">
+              <div className="task-state-heading">
+                <div>
+                  <span>일정 상태</span>
+                  <small>변경 저장을 눌러야 반영돼요.</small>
+                </div>
+                <strong className={completed ? 'is-inactive' : 'is-active'}>
+                  {completed ? '비활성' : '활성'}
+                </strong>
+              </div>
+              <div className="task-state-controls" role="group" aria-label="활성 상태 선택">
+                <button
+                  type="button"
+                  className={!completed ? 'is-selected' : ''}
+                  aria-pressed={!completed}
+                  onClick={() => setCompleted(false)}
+                >
+                  <RotateCcw size={14} /> 활성
+                </button>
+                <button
+                  type="button"
+                  className={completed ? 'is-selected' : ''}
+                  aria-pressed={completed}
+                  onClick={() => setCompleted(true)}
+                >
+                  <Check size={14} /> 비활성
+                </button>
+                <button
+                  type="button"
+                  className="task-remove-button"
+                  onClick={() => setConfirmDelete(true)}
+                >
+                  <Trash2 size={14} /> 제거
+                </button>
+              </div>
+            </section>
+          )}
+
           <label className="field-group">
             <span className="field-label">할 일</span>
             <input
@@ -468,7 +521,7 @@ function TaskModal({
           </fieldset>
 
           <footer className="modal-footer">
-            <span>날짜만 선택해도 바로 저장할 수 있어요.</span>
+            <span>{task ? '내용과 상태 변경은 저장 버튼을 눌러 반영해요.' : '날짜만 선택해도 바로 저장할 수 있어요.'}</span>
             <div>
               <button type="button" className="secondary-button" onClick={onClose}>취소</button>
               <button type="submit" className="primary-button" disabled={!title.trim() || !dueDate}>
@@ -478,6 +531,55 @@ function TaskModal({
           </footer>
         </form>
       </section>
+
+      {task && confirmDelete && (
+        <div
+          className="delete-confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            event.stopPropagation()
+            if (event.target === event.currentTarget) setConfirmDelete(false)
+          }}
+        >
+          <section
+            className="delete-confirm-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirm-title"
+            aria-describedby="delete-confirm-description"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <span className="delete-confirm-icon" aria-hidden="true"><Trash2 size={19} /></span>
+            <div>
+              <h3 id="delete-confirm-title">일정을 삭제할까요?</h3>
+              <p id="delete-confirm-description">
+                <strong>{task.title}</strong> 일정이 캘린더에서 사라집니다. 최근 삭제에서 30일간 복구할 수 있어요.
+              </p>
+            </div>
+            <div className="delete-confirm-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                autoFocus
+                onClick={() => setConfirmDelete(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="delete-confirm-button"
+                onClick={() => {
+                  setConfirmDelete(false)
+                  onDelete(task.id)
+                  onClose()
+                }}
+              >
+                삭제
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }
@@ -533,7 +635,7 @@ function RecoveryPanel({
                   <strong>{task.title}</strong>
                   <span>원래 일정 · {formatCompactDate(task.dueDate)}{task.dueTime ? ` ${task.dueTime}` : ''}</span>
                   <span className="recovery-status">
-                    {task.completed ? '완료 상태' : '진행 중 상태'} · {remainingRetentionDays(task)}일 남음
+                    {task.completed ? '비활성 상태' : '활성 상태'} · {remainingRetentionDays(task)}일 남음
                   </span>
                 </div>
                 <button type="button" className="restore-button" onClick={() => onRestore(task.id)}>
@@ -579,12 +681,11 @@ interface SharedViewProps {
   tasks: Task[]
   loading: boolean
   error: string | null
-  onTaskActivate: (id: string) => void
+  onTaskSecondaryAction: (id: string) => void
   onTaskDelete: (id: string) => void
   onTaskRestore: (id: string) => void
-  onTaskReopen: (id: string) => void
   onCreate: (draft: TaskDraft) => void
-  onUpdate: (id: string, draft: TaskDraft) => void
+  onUpdate: (id: string, draft: TaskDraft, completed?: boolean) => void
 }
 
 function MainView(props: SharedViewProps) {
@@ -592,10 +693,9 @@ function MainView(props: SharedViewProps) {
     tasks,
     loading,
     error,
-    onTaskActivate,
+    onTaskSecondaryAction,
     onTaskDelete,
     onTaskRestore,
-    onTaskReopen,
     onCreate,
     onUpdate,
   } = props
@@ -639,6 +739,12 @@ function MainView(props: SharedViewProps) {
     setModalOpen(true)
   }
 
+  const openTask = (task: Task) => {
+    setSelectedDate(task.dueDate)
+    setEditingTask(task)
+    setModalOpen(true)
+  }
+
   const chooseDate = (key: string) => {
     setSelectedDate(key)
     const date = fromDateKey(key)
@@ -653,6 +759,7 @@ function MainView(props: SharedViewProps) {
   }
 
   const handleCellKey = (event: KeyboardEvent<HTMLDivElement>, key: string) => {
+    if (event.target !== event.currentTarget) return
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
       chooseDate(key)
@@ -674,7 +781,6 @@ function MainView(props: SharedViewProps) {
         <div className="rail-brand"><BrandMark /></div>
         <nav aria-label="주요 메뉴">
           <IconButton label="캘린더" active><LayoutGrid size={20} /></IconButton>
-          <IconButton label="오늘로 이동" onClick={goToday}><CalendarDays size={20} /></IconButton>
           <IconButton
             label={`최근 삭제 ${deleted.length}개`}
             active={recoveryOpen}
@@ -696,7 +802,7 @@ function MainView(props: SharedViewProps) {
             <span className="eyebrow">CALENDAR</span>
             <div>
               <h1>{formatMonthTitle(month)}</h1>
-              <span className="month-summary">{monthTasks.length}개의 일정 · {monthCompleted}개 완료</span>
+              <span className="month-summary">{monthTasks.length}개의 일정 · {monthCompleted}개 비활성</span>
             </div>
           </div>
           <div className="header-actions">
@@ -751,8 +857,8 @@ function MainView(props: SharedViewProps) {
               </IconButton>
             </div>
             <div className="calendar-hint">
-              <span><i className="hint-dot active" /> 진행 중</span>
-              <span><i className="hint-dot done" /> 완료</span>
+              <span><i className="hint-dot active" /> 활성</span>
+              <span><i className="hint-dot done" /> 비활성</span>
             </div>
           </div>
 
@@ -791,7 +897,7 @@ function MainView(props: SharedViewProps) {
                   </div>
                   <div className="cell-tasks">
                     {dayTasks.slice(0, 3).map((task) => (
-                      <TaskChip key={task.id} task={task} onActivate={onTaskActivate} />
+                      <TaskChip key={task.id} task={task} onOpen={openTask} onSecondaryAction={onTaskSecondaryAction} />
                     ))}
                     {hiddenCount > 0 && <span className="more-tasks">+ {hiddenCount}개 더 보기</span>}
                   </div>
@@ -819,7 +925,7 @@ function MainView(props: SharedViewProps) {
             <strong>{selectedCompleted}<small> / {selectedTasks.length}</small></strong>
           </div>
           <div className="progress-track"><span style={{ width: `${selectedTasks.length ? (selectedCompleted / selectedTasks.length) * 100 : 0}%` }} /></div>
-          <p>{selectedTasks.length === 0 ? '아직 등록된 일정이 없어요.' : selectedCompleted === selectedTasks.length ? '모든 일정을 마쳤어요. 멋진 하루예요!' : '일정을 누르면 완료 상태로 바뀝니다.'}</p>
+          <p>{selectedTasks.length === 0 ? '아직 등록된 일정이 없어요.' : selectedCompleted === selectedTasks.length ? '모든 일정이 비활성 상태예요.' : '좌클릭은 상세 보기, 우클릭은 즉시 상태 변경이에요.'}</p>
         </div>
 
         <div className="day-list-header">
@@ -834,13 +940,8 @@ function MainView(props: SharedViewProps) {
               <TaskRow
                 key={task.id}
                 task={task}
-                onActivate={onTaskActivate}
-                onEdit={(selected) => {
-                  setEditingTask(selected)
-                  setModalOpen(true)
-                }}
-                onDelete={onTaskDelete}
-                onReopen={onTaskReopen}
+                onOpen={openTask}
+                onSecondaryAction={onTaskSecondaryAction}
               />
             ))
           )}
@@ -848,7 +949,7 @@ function MainView(props: SharedViewProps) {
 
         <div className="panel-tip">
           <span className="tip-icon"><Check size={14} /></span>
-          <p><strong>완료한 일정은 사라지지 않아요.</strong><span>취소선으로 남고, 다시 누르면 최근 삭제로 이동합니다.</span></p>
+          <p><strong>활성 일정은 우클릭하면 비활성으로 바뀌어요.</strong><span>비활성 일정을 다시 우클릭하면 최근 삭제로 이동합니다.</span></p>
         </div>
       </aside>
 
@@ -860,14 +961,15 @@ function MainView(props: SharedViewProps) {
           setModalOpen(false)
           setEditingTask(null)
         }}
-        onSave={(draft, id) => {
-          if (id) onUpdate(id, draft)
+        onSave={(draft, id, completed) => {
+          if (id) onUpdate(id, draft, completed)
           else onCreate(draft)
           setSelectedDate(draft.dueDate)
           setMonth(startOfMonth(fromDateKey(draft.dueDate)))
           setModalOpen(false)
           setEditingTask(null)
         }}
+        onDelete={onTaskDelete}
       />
       <RecoveryPanel open={recoveryOpen} tasks={deleted} onClose={() => setRecoveryOpen(false)} onRestore={onTaskRestore} />
     </div>
@@ -875,11 +977,21 @@ function MainView(props: SharedViewProps) {
 }
 
 function WidgetView(props: SharedViewProps) {
-  const { tasks, loading, error, onTaskActivate, onCreate } = props
+  const {
+    tasks,
+    loading,
+    error,
+    onTaskSecondaryAction,
+    onTaskDelete,
+    onCreate,
+    onUpdate,
+  } = props
   const today = todayKey()
   const [selectedDate, setSelectedDate] = useState(today)
   const [quickTitle, setQuickTitle] = useState('')
   const [widgetState, setWidgetState] = useState<WidgetState>({ pinned: true, locked: false })
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
   const active = useMemo(() => visibleTasks(tasks), [tasks])
   const selectedTasks = useMemo(
     () => sortTasks(active.filter((task) => task.dueDate === selectedDate)),
@@ -905,12 +1017,19 @@ function WidgetView(props: SharedViewProps) {
     setQuickTitle('')
   }
 
+  const openTask = (task: Task) => {
+    setSelectedDate(task.dueDate)
+    setEditingTask(task)
+    setModalOpen(true)
+  }
+
   if (loading) {
     return <div className="widget-loading"><BrandMark /><span>불러오는 중…</span></div>
   }
 
   return (
-    <div className={`widget-shell ${widgetState.locked ? 'is-locked' : ''}`}>
+    <>
+      <div className={`widget-shell ${widgetState.locked ? 'is-locked' : ''}`}>
       <header className="widget-header">
         <div className="widget-drag-area">
           <GripHorizontal size={17} />
@@ -986,7 +1105,7 @@ function WidgetView(props: SharedViewProps) {
             <EmptyState compact />
           ) : (
             selectedTasks.map((task) => (
-              <TaskRow key={task.id} task={task} compact onActivate={onTaskActivate} />
+              <TaskRow key={task.id} task={task} compact onOpen={openTask} onSecondaryAction={onTaskSecondaryAction} />
             ))
           )}
         </section>
@@ -1001,11 +1120,28 @@ function WidgetView(props: SharedViewProps) {
           />
           <button type="submit" disabled={!quickTitle.trim()}>추가</button>
         </form>
-        <p className="widget-tip">일정을 한 번 눌러 완료 · 다시 눌러 최근 삭제</p>
+        <p className="widget-tip">좌클릭 상세 · 우클릭 활성 → 비활성 → 최근 삭제</p>
       </main>
 
       {!widgetState.locked && <span className="resize-corner" aria-hidden="true" />}
-    </div>
+      </div>
+      <TaskModal
+        open={modalOpen}
+        initialDate={selectedDate}
+        task={editingTask}
+        onClose={() => {
+          setModalOpen(false)
+          setEditingTask(null)
+        }}
+        onSave={(draft, id, completed) => {
+          if (id) onUpdate(id, draft, completed)
+          setSelectedDate(draft.dueDate)
+          setModalOpen(false)
+          setEditingTask(null)
+        }}
+        onDelete={onTaskDelete}
+      />
+    </>
   )
 }
 
@@ -1013,31 +1149,32 @@ export default function App({ mode }: { mode: AppMode }) {
   const { tasks, tasksRef, loading, error, commit } = useTaskStore()
   const [toast, setToast] = useState<ToastMessage | null>(null)
   const toastId = useRef(0)
-  const completionGuard = useRef<Record<string, number>>({})
+  const secondaryActionGuard = useRef<Record<string, number>>({})
 
   const showToast = useCallback((message: string, actionLabel?: string, onAction?: () => void) => {
     toastId.current += 1
     setToast({ id: toastId.current, message, actionLabel, onAction })
   }, [])
 
-  const handleActivate = useCallback((id: string) => {
+  const handleSecondaryAction = useCallback((id: string) => {
     const task = tasksRef.current.find((item) => item.id === id && !item.deletedAt)
     if (!task) return
     const now = Date.now()
-    if (task.completed && (completionGuard.current[id] ?? 0) > now) {
-      showToast('완료 상태로 바뀌었어요. 다음 클릭에서 최근 삭제로 이동합니다.')
+    if (task.completed && (secondaryActionGuard.current[id] ?? 0) > now) {
+      showToast('비활성화됐어요. 잠시 후 다시 우클릭하면 최근 삭제로 이동해요.')
       return
     }
 
-    const result = transitionTask(tasksRef.current, id, new Date(now))
+    const result = advanceTaskState(tasksRef.current, id, new Date(now))
     commit(() => result.tasks)
-    if (result.transition === 'completed') {
-      completionGuard.current[id] = now + 700
-      showToast('완료했어요. 한 번 더 누르면 최근 삭제로 이동해요.', '되돌리기', () => {
-        commit((current) => reopenTask(current, id))
+    if (result.action === 'deactivated') {
+      secondaryActionGuard.current[id] = now + 700
+      showToast('일정을 비활성화했어요. 다시 우클릭하면 최근 삭제로 이동해요.', '활성화', () => {
+        delete secondaryActionGuard.current[id]
+        commit((current) => setTaskCompleted(current, id, false))
       })
-    } else if (result.transition === 'deleted') {
-      delete completionGuard.current[id]
+    } else if (result.action === 'deleted') {
+      delete secondaryActionGuard.current[id]
       showToast('일정을 최근 삭제로 옮겼어요.', '실행 취소', () => {
         commit((current) => restoreTask(current, id))
       })
@@ -1045,6 +1182,7 @@ export default function App({ mode }: { mode: AppMode }) {
   }, [commit, showToast, tasksRef])
 
   const handleDelete = useCallback((id: string) => {
+    delete secondaryActionGuard.current[id]
     commit((current) => softDeleteTask(current, id))
     showToast('일정을 최근 삭제로 옮겼어요.', '실행 취소', () => {
       commit((current) => restoreTask(current, id))
@@ -1054,12 +1192,6 @@ export default function App({ mode }: { mode: AppMode }) {
   const handleRestore = useCallback((id: string) => {
     commit((current) => restoreTask(current, id))
     showToast('원래 날짜와 상태로 복구했어요.')
-  }, [commit, showToast])
-
-  const handleReopen = useCallback((id: string) => {
-    commit((current) => reopenTask(current, id))
-    delete completionGuard.current[id]
-    showToast('진행 중 일정으로 되돌렸어요.')
   }, [commit, showToast])
 
   const handleCreate = useCallback((draft: TaskDraft) => {
@@ -1078,9 +1210,20 @@ export default function App({ mode }: { mode: AppMode }) {
     showToast('새 일정을 캘린더에 추가했어요.')
   }, [commit, showToast])
 
-  const handleUpdate = useCallback((id: string, draft: TaskDraft) => {
-    const now = new Date().toISOString()
-    commit((current) => current.map((task) => task.id === id ? { ...task, ...draft, updatedAt: now } : task))
+  const handleUpdate = useCallback((id: string, draft: TaskDraft, completed?: boolean) => {
+    const now = new Date()
+    const timestamp = now.toISOString()
+    delete secondaryActionGuard.current[id]
+    commit((current) => {
+      const withDraft = current.map((task) =>
+        task.id === id && !task.deletedAt
+          ? { ...task, ...draft, updatedAt: timestamp }
+          : task,
+      )
+      return typeof completed === 'boolean'
+        ? setTaskCompleted(withDraft, id, completed, now)
+        : withDraft
+    })
     showToast('일정 변경을 저장했어요.')
   }, [commit, showToast])
 
@@ -1088,10 +1231,9 @@ export default function App({ mode }: { mode: AppMode }) {
     tasks,
     loading,
     error,
-    onTaskActivate: handleActivate,
+    onTaskSecondaryAction: handleSecondaryAction,
     onTaskDelete: handleDelete,
     onTaskRestore: handleRestore,
-    onTaskReopen: handleReopen,
     onCreate: handleCreate,
     onUpdate: handleUpdate,
   }

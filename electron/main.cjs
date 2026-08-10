@@ -40,7 +40,7 @@ function createSeedStore() {
       {
         id: crypto.randomUUID(),
         title: 'Dayline 프로토타입 살펴보기',
-        note: '일정을 한 번 누르면 완료, 완료된 일정을 다시 누르면 최근 삭제로 이동해요.',
+        note: '활성 일정은 우클릭하면 비활성, 비활성 일정은 다시 우클릭하면 최근 삭제로 이동해요.',
         dueDate: dateOffset(0),
         dueTime: null,
         color: 'coral',
@@ -68,7 +68,7 @@ function createSeedStore() {
       {
         id: crypto.randomUUID(),
         title: '오프라인 저장 동작 확인',
-        note: '완료 상태도 앱을 다시 열었을 때 그대로 유지됩니다.',
+        note: '비활성 상태도 앱을 다시 열었을 때 그대로 유지됩니다.',
         dueDate: dateOffset(0),
         dueTime: null,
         color: 'sage',
@@ -291,7 +291,7 @@ function createMainWindow() {
     titleBarOverlay: {
       color: '#f5f6f1',
       symbolColor: '#27322d',
-      height: 44,
+      height: 36,
     },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

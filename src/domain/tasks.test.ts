@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from '../types'
 import {
+  advanceTaskState,
   isRecoverable,
   purgeExpired,
   restoreTask,
   RETENTION_MS,
-  transitionTask,
+  setTaskCompleted,
 } from './tasks'
 
 const baseTask: Task = {
@@ -24,19 +25,40 @@ const baseTask: Task = {
 }
 
 describe('task lifecycle', () => {
-  it('first click completes without removing the task', () => {
-    const result = transitionTask([baseTask], baseTask.id, new Date('2026-08-10T03:00:00.000Z'))
-    expect(result.transition).toBe('completed')
-    expect(result.tasks[0].completed).toBe(true)
-    expect(result.tasks[0].deletedAt).toBeNull()
+  it('deactivates a task without removing it', () => {
+    const result = setTaskCompleted([baseTask], baseTask.id, true, new Date('2026-08-10T03:00:00.000Z'))
+    expect(result[0].completed).toBe(true)
+    expect(result[0].completedAt).toBe('2026-08-10T03:00:00.000Z')
+    expect(result[0].deletedAt).toBeNull()
   })
 
-  it('next click on a completed task soft-deletes it', () => {
+  it('reactivates a task and clears its completion timestamp', () => {
     const completed = { ...baseTask, completed: true, completedAt: '2026-08-10T03:00:00.000Z' }
-    const result = transitionTask([completed], completed.id, new Date('2026-08-10T04:00:00.000Z'))
-    expect(result.transition).toBe('deleted')
-    expect(result.tasks[0].deletedAt).toBe('2026-08-10T04:00:00.000Z')
-    expect(result.tasks[0].previousCompleted).toBe(true)
+    const result = setTaskCompleted([completed], completed.id, false, new Date('2026-08-10T04:00:00.000Z'))
+    expect(result[0].completed).toBe(false)
+    expect(result[0].completedAt).toBeNull()
+    expect(result[0].deletedAt).toBeNull()
+  })
+
+  it('keeps state commands idempotent and ignores deleted tasks', () => {
+    const unchanged = setTaskCompleted([baseTask], baseTask.id, false)
+    expect(unchanged[0]).toBe(baseTask)
+
+    const deleted = { ...baseTask, deletedAt: '2026-08-10T04:00:00.000Z' }
+    const ignored = setTaskCompleted([deleted], deleted.id, true)
+    expect(ignored[0]).toBe(deleted)
+  })
+
+  it('advances an active task to inactive, then moves it to recent deletion', () => {
+    const first = advanceTaskState([baseTask], baseTask.id, new Date('2026-08-10T03:00:00.000Z'))
+    expect(first.action).toBe('deactivated')
+    expect(first.tasks[0].completed).toBe(true)
+    expect(first.tasks[0].deletedAt).toBeNull()
+
+    const second = advanceTaskState(first.tasks, baseTask.id, new Date('2026-08-10T04:00:00.000Z'))
+    expect(second.action).toBe('deleted')
+    expect(second.tasks[0].deletedAt).toBe('2026-08-10T04:00:00.000Z')
+    expect(second.tasks[0].previousCompleted).toBe(true)
   })
 
   it('restores the original completed state and date fields', () => {

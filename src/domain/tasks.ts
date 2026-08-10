@@ -3,7 +3,7 @@ import type { Task } from '../types'
 export const RETENTION_DAYS = 30
 export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
 
-export type TaskTransition = 'completed' | 'deleted' | 'missing'
+export type TaskAdvanceAction = 'deactivated' | 'deleted' | 'missing'
 
 export function isRecoverable(task: Task, now = Date.now()): boolean {
   if (!task.deletedAt) return false
@@ -36,50 +36,32 @@ export function sortTasks(tasks: Task[]): Task[] {
   })
 }
 
-export function transitionTask(
+export function setTaskCompleted(
   tasks: Task[],
   taskId: string,
+  completed: boolean,
   now = new Date(),
-): { tasks: Task[]; transition: TaskTransition } {
+): Task[] {
   const target = tasks.find((task) => task.id === taskId && !task.deletedAt)
-  if (!target) return { tasks, transition: 'missing' }
+  if (!target || target.completed === completed) return tasks
   const timestamp = now.toISOString()
 
-  if (!target.completed) {
-    return {
-      transition: 'completed',
-      tasks: tasks.map((task) =>
-        task.id === taskId
-          ? {
-              ...task,
-              completed: true,
-              completedAt: timestamp,
-              updatedAt: timestamp,
-            }
-          : task,
-      ),
-    }
-  }
-
-  return {
-    transition: 'deleted',
-    tasks: tasks.map((task) =>
-      task.id === taskId
-        ? {
-            ...task,
-            deletedAt: timestamp,
-            previousCompleted: task.completed,
-            updatedAt: timestamp,
-          }
-        : task,
-    ),
-  }
+  return tasks.map((task) =>
+    task.id === taskId
+      ? {
+          ...task,
+          completed,
+          completedAt: completed ? timestamp : null,
+          updatedAt: timestamp,
+        }
+      : task,
+  )
 }
 
 export function softDeleteTask(tasks: Task[], taskId: string, now = new Date()): Task[] {
   const timestamp = now.toISOString()
   return tasks.map((task) =>
-    task.id === taskId
+    task.id === taskId && !task.deletedAt
       ? {
           ...task,
           deletedAt: timestamp,
@@ -88,6 +70,25 @@ export function softDeleteTask(tasks: Task[], taskId: string, now = new Date()):
         }
       : task,
   )
+}
+
+export function advanceTaskState(
+  tasks: Task[],
+  taskId: string,
+  now = new Date(),
+): { tasks: Task[]; action: TaskAdvanceAction } {
+  const target = tasks.find((task) => task.id === taskId && !task.deletedAt)
+  if (!target) return { tasks, action: 'missing' }
+  if (!target.completed) {
+    return {
+      tasks: setTaskCompleted(tasks, taskId, true, now),
+      action: 'deactivated',
+    }
+  }
+  return {
+    tasks: softDeleteTask(tasks, taskId, now),
+    action: 'deleted',
+  }
 }
 
 export function restoreTask(tasks: Task[], taskId: string, now = new Date()): Task[] {
@@ -102,20 +103,6 @@ export function restoreTask(tasks: Task[], taskId: string, now = new Date()): Ta
               : task.completed,
           deletedAt: null,
           previousCompleted: null,
-          updatedAt: timestamp,
-        }
-      : task,
-  )
-}
-
-export function reopenTask(tasks: Task[], taskId: string, now = new Date()): Task[] {
-  const timestamp = now.toISOString()
-  return tasks.map((task) =>
-    task.id === taskId
-      ? {
-          ...task,
-          completed: false,
-          completedAt: null,
           updatedAt: timestamp,
         }
       : task,
