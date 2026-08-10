@@ -4,10 +4,16 @@ Windows PC에서 오프라인으로 사용하는 캘린더 중심 To-Do 데스�
 
 ## 구현된 핵심 기능
 
-- 월간 캘린더 위에 일정 칩 표시
+- 월간 캘린더 위에 상위 일정만 간결한 칩으로 표시
+- 이전·다음 달 이동과 연·월 직접 선택
 - 날짜를 기본값으로 두고, 사용자가 `시간도 지정`을 켰을 때만 시간 입력 노출
-- 일정 좌클릭: 상세 내용 확인과 제목·날짜·시간·메모·색상 수정
+- 일정 좌클릭: 상세 내용 확인과 제목·날짜·시간·메모·색상·세부 할 일 수정
 - 일정 우클릭: 활성 일정은 즉시 비활성화, 비활성 일정은 `최근 삭제`로 이동
+- 비활성화해도 일정의 정렬 위치를 유지하고, 기존 일정 색상을 옅게 표시
+- 세부 할 일을 각각 완료할 수 있으며, 모두 완료하면 상위 일정도 자동 비활성화
+- 상위 일정의 비활성화·삭제·복구를 세부 할 일과 함께 처리
+- 선택한 날짜에 제목·마감·색상 형식이 없는 여러 줄 `순간 메모` 작성
+- 순간 메모는 우측 패널에서만 관리하며 캘린더에는 표시하지 않음
 - 상세 화면의 내용·활성 상태 변경은 `변경 저장` 때만 반영되며, `취소` 시 모두 폐기
 - 상세 화면의 `제거`는 확인 후 실행하고, 우클릭 제거는 확인 없이 즉시 실행
 - 비활성 일정은 취소선과 구분 색상으로 캘린더에 유지
@@ -21,12 +27,13 @@ Windows PC에서 오프라인으로 사용하는 캘린더 중심 To-Do 데스�
   - 마지막 위치·크기·고정 상태 자동 복원
   - 다중 모니터 구성이 바뀌어도 화면 안으로 위치 보정
 - 메인 창과 위젯의 로컬 데이터 실시간 공유
-- 로컬 JSON 파일의 임시 파일 교체 방식 저장
+- Electron에 내장된 SQLite DB로 일정과 계정 확장 메타데이터를 트랜잭션 저장
+- 기존 `dayline-data.json` 일정은 최초 실행 시 자동 이전하고 원본 백업 보존
 - 최초 실행용 예시 일정과 복구 예시 제공
 
 ## 개발 실행
 
-요구 환경은 Windows 10/11과 Node.js 20 이상입니다.
+개발 환경은 Windows 10/11과 `node:sqlite`를 기본 제공하는 Node.js 22.13 이상입니다. 설치된 앱은 Electron에 SQLite를 포함하므로 사용자 PC에 Node.js가 필요하지 않습니다.
 
 ```powershell
 npm install
@@ -39,34 +46,51 @@ npm run dev
 ```powershell
 npm test
 npm run build
+npm run qa:database
 npm run qa:capture
 ```
 
-- `npm test`: 활성·비활성 전환, 최근 삭제·복구와 정확한 30일 경계 조건 검증
+- `npm test`: 활성·비활성 전환, JSON→SQLite 이전, 필드 단위 동시 변경과 정확한 30일 경계 조건 검증
 - `npm run build`: TypeScript 검사와 프로덕션 렌더러 빌드
+- `npm run qa:database`: 실제 Electron의 `node:sqlite`, preload IPC, 메인·위젯 동시 저장 검증
 - `npm run qa:capture`: 실제 Electron 렌더러의 메인·위젯 화면을 캡처하고 상세·우클릭 동작을 점검
 
 ## Windows 설치 파일 만들기
 
 ```powershell
+npm run dist:setup
+# 또는 Setup + Portable을 모두 만들려면
 npm run dist:win
 ```
 
-`release` 폴더에 다음 두 파일이 생성됩니다.
+`npm run dist:setup`은 첫 번째 파일만, `npm run dist:win`은 다음 두 파일을 `release` 폴더에 생성합니다.
 
-- `Dayline-Setup-0.1.0-x64.exe`: 설치 경로를 고를 수 있는 NSIS 설치 프로그램
-- `Dayline-Portable-0.1.0-x64.exe`: 설치 없이 실행하는 포터블 프로그램
+- `Dayline-Setup-0.2.0-x64.exe`: 설치 경로를 고를 수 있고 바탕화면·시작 메뉴 바로가기를 만드는 NSIS 설치 프로그램
+- `Dayline-Portable-0.2.0-x64.exe`: 설치 없이 실행하는 포터블 프로그램
 
 두 결과물 모두 Electron 런타임과 모든 화면 자산을 포함하므로 설치와 사용에 인터넷 연결이 필요하지 않습니다. 프로토타입은 코드 서명을 하지 않았기 때문에 다른 PC에서 처음 실행할 때 Windows SmartScreen 경고가 나타날 수 있습니다.
 
 ## 데이터 위치
 
-설치 버전은 Electron의 Windows `userData` 폴더 아래에 다음 파일을 저장합니다.
+설치 버전과 Portable 버전은 Electron의 Windows `userData` 폴더 아래에 다음 파일을 저장합니다.
 
-- `dayline-data.json`: 활성 일정, 비활성 일정, 최근 삭제 일정
+- `dayline.db`: 일정, 로컬 프로필, 계정 연결 메타데이터와 향후 동기화 상태
+- `dayline.db-wal`, `dayline.db-shm`: 앱 실행 중 SQLite가 사용할 수 있는 트랜잭션 보조 파일
+- `dayline-data.json.pre-sqlite-backup`: 기존 JSON 일정이 있었을 때 한 번 생성되는 이전 전 백업
+- `dayline-data.json.migration-failed-backup`: 기존 JSON을 읽지 못했을 때 원본과 함께 보존되는 복구용 백업
 - `dayline-window-state.json`: 위젯 위치, 크기, 항상 위, 잠금 상태
 
 개발 실행 데이터는 `%APPDATA%\Dayline Dev`로 분리됩니다.
+
+## 계정 연동 확장 설계
+
+현재 앱은 서버 없이 `guest` 로컬 프로필로 동작합니다. DB에는 추후 Google·Kakao·Naver 등의 로그인 제공자를 연결할 수 있도록 `profiles`, `auth_identities`, `devices`, `sync_outbox`, `sync_cursors` 구조가 포함되어 있습니다.
+
+- SNS 계정은 이메일이 아니라 제공자의 고유 `provider_subject`로 구분
+- 기존 오프라인 일정은 같은 프로필에 서버 사용자 ID를 연결해 그대로 유지
+- 메인 창과 위젯은 전체 배열을 덮어쓰지 않고 변경된 필드만 SQLite 트랜잭션으로 반영
+- 실제 OAuth 토큰은 현재 저장하지 않으며, 연동 구현 시 Windows DPAPI 또는 Credential Manager로 보호
+- 서버 동기화를 추가할 때 PostgreSQL은 서버의 중앙 저장소로 사용하고 SQLite는 오프라인 캐시로 유지
 
 ## 프로토타입 범위
 

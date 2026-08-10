@@ -27,12 +27,12 @@ export function deletedTasks(tasks: Task[], now = Date.now()): Task[] {
 
 export function sortTasks(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
-    if (a.completed !== b.completed) return Number(a.completed) - Number(b.completed)
     if (Boolean(a.dueTime) !== Boolean(b.dueTime)) return a.dueTime ? -1 : 1
     if (a.dueTime && b.dueTime && a.dueTime !== b.dueTime) {
       return a.dueTime.localeCompare(b.dueTime)
     }
-    return a.createdAt.localeCompare(b.createdAt)
+    const createdOrder = a.createdAt.localeCompare(b.createdAt)
+    return createdOrder !== 0 ? createdOrder : a.id.localeCompare(b.id)
   })
 }
 
@@ -43,7 +43,9 @@ export function setTaskCompleted(
   now = new Date(),
 ): Task[] {
   const target = tasks.find((task) => task.id === taskId && !task.deletedAt)
-  if (!target || target.completed === completed) return tasks
+  if (!target) return tasks
+  const childrenAlreadyMatch = target.subTasks.every((subTask) => subTask.completed === completed)
+  if (target.completed === completed && childrenAlreadyMatch) return tasks
   const timestamp = now.toISOString()
 
   return tasks.map((task) =>
@@ -53,9 +55,53 @@ export function setTaskCompleted(
           completed,
           completedAt: completed ? timestamp : null,
           updatedAt: timestamp,
+          subTasks: task.subTasks.map((subTask) =>
+            subTask.completed === completed
+              ? subTask
+              : {
+                  ...subTask,
+                  completed,
+                  completedAt: completed ? timestamp : null,
+                  updatedAt: timestamp,
+                },
+          ),
         }
       : task,
   )
+}
+
+export function toggleSubTask(
+  tasks: Task[],
+  taskId: string,
+  subTaskId: string,
+  now = new Date(),
+): Task[] {
+  const target = tasks.find((task) => task.id === taskId && !task.deletedAt)
+  if (!target || !target.subTasks.some((subTask) => subTask.id === subTaskId)) return tasks
+
+  const timestamp = now.toISOString()
+  return tasks.map((task) => {
+    if (task.id !== taskId) return task
+
+    const subTasks = task.subTasks.map((subTask) => {
+      if (subTask.id !== subTaskId) return subTask
+      const completed = !subTask.completed
+      return {
+        ...subTask,
+        completed,
+        completedAt: completed ? timestamp : null,
+        updatedAt: timestamp,
+      }
+    })
+    const completed = subTasks.length > 0 && subTasks.every((subTask) => subTask.completed)
+    return {
+      ...task,
+      subTasks,
+      completed,
+      completedAt: completed ? timestamp : null,
+      updatedAt: timestamp,
+    }
+  })
 }
 
 export function softDeleteTask(tasks: Task[], taskId: string, now = new Date()): Task[] {

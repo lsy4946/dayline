@@ -1,128 +1,25 @@
 const { app, BrowserWindow, ipcMain, screen } = require('electron')
 const fs = require('node:fs')
 const path = require('node:path')
-const crypto = require('node:crypto')
-
-const DAY_MS = 24 * 60 * 60 * 1000
-const RETENTION_MS = 30 * DAY_MS
+const { fileURLToPath } = require('node:url')
+const { createDaylineDatabase } = require('./database.cjs')
 
 let mainWindow = null
 let widgetWindow = null
-let storePath = ''
+let taskDatabase = null
 let windowStatePath = ''
 let persistBoundsTimer = null
 
 const isDev = !app.isPackaged
+const isDatabaseQa = process.env.DAYLINE_DATABASE_QA === '1'
 
-function localDateKey(date = new Date()) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function dateOffset(offset) {
-  const date = new Date()
-  date.setHours(12, 0, 0, 0)
-  date.setDate(date.getDate() + offset)
-  return localDateKey(date)
-}
-
-function createSeedStore() {
-  const now = new Date()
-  const nowIso = now.toISOString()
-  const completedAt = new Date(now.getTime() - 52 * 60 * 1000).toISOString()
-  const deletedAt = new Date(now.getTime() - 2 * DAY_MS).toISOString()
-
-  return {
-    version: 1,
-    tasks: [
-      {
-        id: crypto.randomUUID(),
-        title: 'Dayline 프로토타입 살펴보기',
-        note: '활성 일정은 우클릭하면 비활성, 비활성 일정은 다시 우클릭하면 최근 삭제로 이동해요.',
-        dueDate: dateOffset(0),
-        dueTime: null,
-        color: 'coral',
-        completed: false,
-        completedAt: null,
-        deletedAt: null,
-        previousCompleted: null,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-      {
-        id: crypto.randomUUID(),
-        title: '오늘의 우선순위 정리',
-        note: '',
-        dueDate: dateOffset(0),
-        dueTime: '10:30',
-        color: 'violet',
-        completed: false,
-        completedAt: null,
-        deletedAt: null,
-        previousCompleted: null,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-      {
-        id: crypto.randomUUID(),
-        title: '오프라인 저장 동작 확인',
-        note: '비활성 상태도 앱을 다시 열었을 때 그대로 유지됩니다.',
-        dueDate: dateOffset(0),
-        dueTime: null,
-        color: 'sage',
-        completed: true,
-        completedAt,
-        deletedAt: null,
-        previousCompleted: null,
-        createdAt: nowIso,
-        updatedAt: completedAt,
-      },
-      {
-        id: crypto.randomUUID(),
-        title: '주간 계획 초안',
-        note: '',
-        dueDate: dateOffset(1),
-        dueTime: null,
-        color: 'blue',
-        completed: false,
-        completedAt: null,
-        deletedAt: null,
-        previousCompleted: null,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-      {
-        id: crypto.randomUUID(),
-        title: '프로젝트 회고',
-        note: '잘된 점과 다음 개선점을 기록하기',
-        dueDate: dateOffset(3),
-        dueTime: '15:00',
-        color: 'amber',
-        completed: false,
-        completedAt: null,
-        deletedAt: null,
-        previousCompleted: null,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-      {
-        id: crypto.randomUUID(),
-        title: '복구 기능 예시 일정',
-        note: '최근 삭제에서 복구할 수 있는 예시입니다.',
-        dueDate: dateOffset(-3),
-        dueTime: null,
-        color: 'blue',
-        completed: true,
-        completedAt: new Date(now.getTime() - 4 * DAY_MS).toISOString(),
-        deletedAt,
-        previousCompleted: true,
-        createdAt: new Date(now.getTime() - 6 * DAY_MS).toISOString(),
-        updatedAt: deletedAt,
-      },
-    ],
+if (isDatabaseQa) {
+  if (!process.env.DAYLINE_DATABASE_QA_USER_DATA) {
+    throw new Error('DAYLINE_DATABASE_QA_USER_DATA is required in database QA mode')
   }
+  app.setPath('userData', path.resolve(process.env.DAYLINE_DATABASE_QA_USER_DATA))
+} else if (isDev) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'Dayline Dev'))
 }
 
 function atomicWriteJson(filePath, value) {
@@ -135,75 +32,6 @@ function atomicWriteJson(filePath, value) {
     fs.copyFileSync(tempPath, filePath)
     fs.unlinkSync(tempPath)
   }
-}
-
-function purgeExpiredTasks(tasks, now = Date.now()) {
-  return tasks.filter((task) => {
-    if (!task.deletedAt) return true
-    const deletedAt = new Date(task.deletedAt).getTime()
-    return Number.isFinite(deletedAt) && now - deletedAt <= RETENTION_MS
-  })
-}
-
-function sanitizeTask(task) {
-  if (!task || typeof task !== 'object') return null
-  if (typeof task.id !== 'string' || typeof task.title !== 'string') return null
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate || '')) return null
-
-  const colors = new Set(['coral', 'violet', 'sage', 'blue', 'amber'])
-  return {
-    id: task.id,
-    title: task.title.slice(0, 240),
-    note: typeof task.note === 'string' ? task.note.slice(0, 2000) : '',
-    dueDate: task.dueDate,
-    dueTime: /^\d{2}:\d{2}$/.test(task.dueTime || '') ? task.dueTime : null,
-    color: colors.has(task.color) ? task.color : 'coral',
-    completed: Boolean(task.completed),
-    completedAt: typeof task.completedAt === 'string' ? task.completedAt : null,
-    deletedAt: typeof task.deletedAt === 'string' ? task.deletedAt : null,
-    previousCompleted:
-      typeof task.previousCompleted === 'boolean' ? task.previousCompleted : null,
-    createdAt: typeof task.createdAt === 'string' ? task.createdAt : new Date().toISOString(),
-    updatedAt: typeof task.updatedAt === 'string' ? task.updatedAt : new Date().toISOString(),
-  }
-}
-
-function readStore() {
-  if (!fs.existsSync(storePath)) {
-    const seed = createSeedStore()
-    atomicWriteJson(storePath, seed)
-    return seed
-  }
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8'))
-    const tasks = Array.isArray(parsed.tasks)
-      ? parsed.tasks.map(sanitizeTask).filter(Boolean)
-      : []
-    const purged = purgeExpiredTasks(tasks)
-    const store = { version: 1, tasks: purged }
-    if (purged.length !== tasks.length) atomicWriteJson(storePath, store)
-    return store
-  } catch (error) {
-    const backupPath = `${storePath}.corrupt-${Date.now()}`
-    try {
-      fs.copyFileSync(storePath, backupPath)
-    } catch {
-      // If backup also fails, continue with a fresh safe store.
-    }
-    const fresh = createSeedStore()
-    atomicWriteJson(storePath, fresh)
-    return fresh
-  }
-}
-
-function saveTasks(rawTasks) {
-  const tasks = Array.isArray(rawTasks)
-    ? rawTasks.map(sanitizeTask).filter(Boolean)
-    : []
-  const store = { version: 1, tasks: purgeExpiredTasks(tasks) }
-  atomicWriteJson(storePath, store)
-  return store
 }
 
 function defaultWindowState() {
@@ -271,6 +99,26 @@ function loadRenderer(window, mode = 'main') {
   })
 }
 
+function isAllowedRendererUrl(targetUrl) {
+  try {
+    const target = new URL(targetUrl)
+    if (isDev && process.env.VITE_DEV_SERVER_URL) {
+      return target.origin === new URL(process.env.VITE_DEV_SERVER_URL).origin
+    }
+    return target.protocol === 'file:'
+      && path.resolve(fileURLToPath(target)) === path.resolve(__dirname, '..', 'dist', 'index.html')
+  } catch {
+    return false
+  }
+}
+
+function hardenRendererWindow(window) {
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, targetUrl) => {
+    if (!isAllowedRendererUrl(targetUrl)) event.preventDefault()
+  })
+}
+
 function createMainWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
@@ -301,8 +149,11 @@ function createMainWindow() {
     },
   })
 
+  hardenRendererWindow(mainWindow)
   loadRenderer(mainWindow, 'main')
-  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.once('ready-to-show', () => {
+    if (!isDatabaseQa) mainWindow?.show()
+  })
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -353,10 +204,13 @@ function createWidgetWindow() {
     },
   })
 
+  hardenRendererWindow(widgetWindow)
   widgetWindow.setAlwaysOnTop(state.widget.pinned, 'floating')
   widgetWindow.setVisibleOnAllWorkspaces(true)
   loadRenderer(widgetWindow, 'widget')
-  widgetWindow.once('ready-to-show', () => widgetWindow?.show())
+  widgetWindow.once('ready-to-show', () => {
+    if (!isDatabaseQa) widgetWindow?.show()
+  })
   widgetWindow.on('move', persistWidgetBoundsSoon)
   widgetWindow.on('resize', persistWidgetBoundsSoon)
   widgetWindow.on('closed', () => {
@@ -369,18 +223,38 @@ function createWidgetWindow() {
 function broadcastData(store, senderId) {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed() && window.webContents.id !== senderId) {
-      window.webContents.send('dayline:data-changed', store)
+      try {
+        window.webContents.send('dayline:data-changed', store)
+      } catch {
+        // A window can be destroyed between enumeration and delivery.
+      }
     }
   }
 }
 
 function registerIpc() {
-  ipcMain.handle('dayline:data-load', () => readStore())
-  ipcMain.handle('dayline:data-save', (event, tasks) => {
-    const store = saveTasks(tasks)
-    broadcastData(store, event.sender.id)
-    return store
+  const trustedDataWindow = (sender) => {
+    const owner = BrowserWindow.fromWebContents(sender)
+    return owner && (owner === mainWindow || owner === widgetWindow) ? owner : null
+  }
+  ipcMain.handle('dayline:data-load', (event) => {
+    if (!trustedDataWindow(event.sender)) throw new Error('Untrusted Dayline data sender')
+    return taskDatabase.readStore()
   })
+  const applyStoreMutations = (event, mutations) => {
+    try {
+      if (!trustedDataWindow(event.sender)) throw new Error('Untrusted Dayline data sender')
+      if (!Array.isArray(mutations) || mutations.length > 1000) {
+        throw new Error('Invalid Dayline mutation batch')
+      }
+      const store = taskDatabase.applyStoreMutations(mutations)
+      broadcastData(store, event.sender.id)
+      event.returnValue = { ok: true, store }
+    } catch {
+      event.returnValue = { ok: false, code: 'DAYLINE_DATABASE_WRITE_FAILED' }
+    }
+  }
+  ipcMain.on('dayline:store-apply-sync', applyStoreMutations)
   ipcMain.handle('dayline:widget-open', () => {
     createWidgetWindow()
     return readWindowState().widget
@@ -436,12 +310,13 @@ if (!singleInstance) {
 } else {
   app.on('second-instance', () => createMainWindow())
   app.whenReady().then(() => {
-    if (isDev) {
-      app.setPath('userData', path.join(app.getPath('appData'), 'Dayline Dev'))
-    }
-    fs.mkdirSync(app.getPath('userData'), { recursive: true })
-    storePath = path.join(app.getPath('userData'), 'dayline-data.json')
-    windowStatePath = path.join(app.getPath('userData'), 'dayline-window-state.json')
+    const userDataPath = app.getPath('userData')
+    fs.mkdirSync(userDataPath, { recursive: true })
+    taskDatabase = createDaylineDatabase({
+      databasePath: path.join(userDataPath, 'dayline.db'),
+      legacyJsonPath: path.join(userDataPath, 'dayline-data.json'),
+    })
+    windowStatePath = path.join(userDataPath, 'dayline-window-state.json')
     registerIpc()
     createMainWindow()
 
@@ -453,4 +328,9 @@ if (!singleInstance) {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  taskDatabase?.close()
+  taskDatabase = null
 })
