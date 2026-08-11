@@ -1,24 +1,32 @@
-import { describe, expect, it } from 'vitest'
-import type { Task } from '../types'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { DaylineStore, StoreMutation, Task, TaskTag, TaskTemplate } from '../types'
+import { createBuiltInTaskTags, DEFAULT_APP_SETTINGS, saveStore } from '../lib/storage'
 import {
   advanceTaskState,
   isRecoverable,
   purgeExpired,
+  reorderPositioned,
   restoreTask,
   RETENTION_MS,
   setTaskCompleted,
   softDeleteTask,
   sortTasks,
+  taskOccursOnDate,
+  taskOverlapsRange,
   toggleSubTask,
 } from './tasks'
+import { inclusiveDateKeys } from './date'
 
 const baseTask: Task = {
   id: 'task-1',
   title: '테스트 일정',
   note: '',
+  startDate: '2026-08-10',
   dueDate: '2026-08-10',
   dueTime: null,
   color: 'coral',
+  tagId: 'builtin-coral',
+  position: 0,
   completed: false,
   completedAt: null,
   deletedAt: null,
@@ -154,6 +162,47 @@ describe('stable task order', () => {
     ]
     expect(sortTasks(tasks).map((task) => task.id)).toEqual(['a', 'b'])
   })
+
+  it('uses manual position before every automatic tie breaker', () => {
+    const tasks = [
+      { ...baseTask, id: 'first', position: 0, dueTime: null },
+      { ...baseTask, id: 'second', position: 1, dueTime: '08:00' },
+    ]
+    expect(sortTasks(tasks).map((task) => task.id)).toEqual(['first', 'second'])
+  })
+
+  it('reorders only listed rows and emits deterministic positions', () => {
+    const tasks = [
+      { ...baseTask, id: 'a', position: 0 },
+      { ...baseTask, id: 'b', position: 1 },
+      { ...baseTask, id: 'outside', position: 9 },
+    ]
+    const reordered = reorderPositioned(tasks, ['b', 'a'], new Date('2026-08-10T06:00:00.000Z'))
+    expect(reordered.map(({ id, position }) => ({ id, position }))).toEqual([
+      { id: 'a', position: 1 },
+      { id: 'b', position: 0 },
+      { id: 'outside', position: 9 },
+    ])
+    expect(reordered[2]).toBe(tasks[2])
+  })
+})
+
+describe('inclusive task ranges', () => {
+  const rangeTask = { ...baseTask, startDate: '2026-08-10', dueDate: '2026-08-12' }
+
+  it('includes both period boundaries and every calendar day between them', () => {
+    expect(inclusiveDateKeys(rangeTask.startDate, rangeTask.dueDate)).toEqual([
+      '2026-08-10', '2026-08-11', '2026-08-12',
+    ])
+    expect(taskOccursOnDate(rangeTask, '2026-08-10')).toBe(true)
+    expect(taskOccursOnDate(rangeTask, '2026-08-12')).toBe(true)
+    expect(taskOccursOnDate(rangeTask, '2026-08-13')).toBe(false)
+  })
+
+  it('detects range overlap at a shared boundary', () => {
+    expect(taskOverlapsRange(rangeTask, '2026-08-12', '2026-08-14')).toBe(true)
+    expect(taskOverlapsRange(rangeTask, '2026-08-13', '2026-08-14')).toBe(false)
+  })
 })
 describe('30 day recovery window', () => {
   const now = new Date('2026-09-09T04:00:00.000Z').getTime()
@@ -168,5 +217,136 @@ describe('30 day recovery window', () => {
     const task = { ...baseTask, deletedAt: new Date(now - RETENTION_MS - 1).toISOString() }
     expect(isRecoverable(task, now)).toBe(false)
     expect(purgeExpired([task], now)).toHaveLength(0)
+  })
+})
+
+describe('tag deletion mutation compaction', () => {
+  const timestamp = '2026-08-10T00:00:00.000Z'
+  const changedAt = '2026-08-10T01:00:00.000Z'
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  function stores(taskCount: number): { previous: DaylineStore; next: DaylineStore } {
+    const builtIns = createBuiltInTaskTags(timestamp)
+    const customTag: TaskTag = {
+      id: 'custom-shared',
+      name: '공유 태그',
+      color: '#123456',
+      builtIn: false,
+      legacyColor: null,
+      position: builtIns.length,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const taskTemplate: TaskTemplate = {
+      id: 'template-shared',
+      title: '공유 템플릿',
+      note: '원본 메모',
+      dueTime: null,
+      tagId: customTag.id,
+      legacyColor: 'coral',
+      durationDays: 1,
+      subTaskTitles: [],
+      position: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const tasks = Array.from({ length: taskCount }, (_, position): Task => ({
+      ...baseTask,
+      id: `shared-task-${position}`,
+      title: `공유 일정 ${position}`,
+      tagId: customTag.id,
+      position,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }))
+    const previous: DaylineStore = {
+      version: 1,
+      revision: 1,
+      tasks,
+      dailyNotes: [],
+      taskTags: [...builtIns, customTag],
+      settings: { ...DEFAULT_APP_SETTINGS },
+      taskTemplates: [taskTemplate],
+      migrationWarning: null,
+    }
+    return {
+      previous,
+      next: {
+        ...previous,
+        tasks: tasks.map((task, index) => ({
+          ...task,
+          tagId: null,
+          ...(index === 0 ? { title: '함께 수정한 일정', updatedAt: changedAt } : {}),
+        })),
+        taskTags: builtIns,
+        taskTemplates: [{
+          ...taskTemplate,
+          tagId: null,
+          note: '함께 수정한 메모',
+          updatedAt: changedAt,
+        }],
+      },
+    }
+  }
+
+  it('delegates 1000 reference clears to one tag delete while preserving other dirty fields', () => {
+    const { previous, next } = stores(1000)
+    let captured: StoreMutation[] = []
+    vi.stubGlobal('window', {
+      dayline: {
+        applyStoreMutations: (mutations: StoreMutation[]) => {
+          captured = mutations
+          return next
+        },
+      },
+    })
+
+    saveStore(previous, next)
+
+    expect(captured).toHaveLength(3)
+    const taskPatches = captured.filter((mutation) => mutation.type === 'task:patch')
+    const templatePatches = captured.filter((mutation) => mutation.type === 'template:patch')
+    expect(taskPatches).toHaveLength(1)
+    expect(taskPatches[0]).toMatchObject({
+      id: 'shared-task-0',
+      changes: { title: '함께 수정한 일정', updatedAt: changedAt },
+    })
+    expect(taskPatches[0].changes).not.toHaveProperty('tagId')
+    expect(templatePatches).toHaveLength(1)
+    expect(templatePatches[0]).toMatchObject({
+      id: 'template-shared',
+      changes: { note: '함께 수정한 메모', updatedAt: changedAt },
+    })
+    expect(templatePatches[0].changes).not.toHaveProperty('tagId')
+    expect(captured).toContainEqual({ type: 'tag:delete', id: 'custom-shared' })
+  })
+
+  it('returns canonical null references after the browser tag-delete cascade', () => {
+    const { previous, next } = stores(2)
+    const values = new Map<string, string>()
+    const browserStorage = {
+      get length() { return values.size },
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      removeItem: (key: string) => { values.delete(key) },
+      setItem: (key: string, value: string) => { values.set(key, String(value)) },
+    } satisfies Storage
+    browserStorage.setItem('dayline-browser-store-v1', JSON.stringify(previous))
+    vi.stubGlobal('localStorage', browserStorage)
+    vi.stubGlobal('window', {
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
+
+    const canonical = saveStore(previous, next)
+
+    expect(canonical.tasks.every((task) => task.tagId === null)).toBe(true)
+    expect(canonical.taskTemplates[0].tagId).toBeNull()
+    expect(canonical.tasks[0].title).toBe('함께 수정한 일정')
+    expect(canonical.taskTemplates[0].note).toBe('함께 수정한 메모')
+    expect(canonical.taskTags.some((tag) => tag.id === 'custom-shared')).toBe(false)
   })
 })

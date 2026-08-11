@@ -4,15 +4,42 @@ const { DatabaseSync } = require('node:sqlite')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const STORE_VERSION = 1
 const TASK_COLORS = new Set(['coral', 'violet', 'sage', 'blue', 'amber'])
+const DEFAULT_APP_SETTINGS = Object.freeze({
+  sidebarSplit: 50,
+  widgetSplit: 50,
+  fontScale: 1,
+  themeColor: '#255F4B',
+})
+const BUILT_IN_TAG_DEFINITIONS = Object.freeze([
+  { id: 'builtin-coral', name: '코랄', color: '#EF6F61', legacyColor: 'coral' },
+  { id: 'builtin-violet', name: '바이올렛', color: '#8B6FD6', legacyColor: 'violet' },
+  { id: 'builtin-sage', name: '세이지', color: '#6F9F7D', legacyColor: 'sage' },
+  { id: 'builtin-blue', name: '블루', color: '#4F86C6', legacyColor: 'blue' },
+  { id: 'builtin-amber', name: '앰버', color: '#D99A32', legacyColor: 'amber' },
+  { id: 'builtin-rose', name: '로즈', color: '#D66787', legacyColor: null },
+  { id: 'builtin-teal', name: '틸', color: '#3F9B96', legacyColor: null },
+  { id: 'builtin-indigo', name: '인디고', color: '#5C6AC4', legacyColor: null },
+  { id: 'builtin-slate', name: '슬레이트', color: '#718096', legacyColor: null },
+])
+const LEGACY_TAG_ID_BY_COLOR = Object.freeze({
+  coral: 'builtin-coral',
+  violet: 'builtin-violet',
+  sage: 'builtin-sage',
+  blue: 'builtin-blue',
+  amber: 'builtin-amber',
+})
 const TASK_PATCHABLE_FIELDS = [
   'title',
   'note',
+  'startDate',
   'dueDate',
   'dueTime',
   'color',
+  'tagId',
+  'position',
   'completed',
   'completedAt',
   'deletedAt',
@@ -22,9 +49,12 @@ const TASK_PATCHABLE_FIELDS = [
 const TASK_COLUMN_BY_FIELD = {
   title: 'title',
   note: 'note',
+  startDate: 'start_date',
   dueDate: 'due_date',
   dueTime: 'due_time',
   color: 'color',
+  tagId: 'tag_id',
+  position: 'position',
   completed: 'completed',
   completedAt: 'completed_at',
   deletedAt: 'deleted_at',
@@ -38,12 +68,35 @@ const SUBTASK_COLUMN_BY_FIELD = {
   completedAt: 'completed_at',
   updatedAt: 'updated_at',
 }
-const DAILY_NOTE_PATCHABLE_FIELDS = ['content', 'noteDate', 'completed', 'completedAt', 'updatedAt']
+const DAILY_NOTE_PATCHABLE_FIELDS = ['content', 'noteDate', 'completed', 'completedAt', 'position', 'updatedAt']
 const DAILY_NOTE_COLUMN_BY_FIELD = {
   content: 'content',
   noteDate: 'note_date',
   completed: 'completed',
   completedAt: 'completed_at',
+  position: 'position',
+  updatedAt: 'updated_at',
+}
+const TAG_PATCHABLE_FIELDS = ['name', 'color', 'position', 'updatedAt']
+const TAG_COLUMN_BY_FIELD = {
+  name: 'name',
+  color: 'color',
+  position: 'position',
+  updatedAt: 'updated_at',
+}
+const TEMPLATE_PATCHABLE_FIELDS = [
+  'title', 'note', 'dueTime', 'tagId', 'legacyColor', 'durationDays',
+  'subTaskTitles', 'position', 'updatedAt',
+]
+const TEMPLATE_COLUMN_BY_FIELD = {
+  title: 'title',
+  note: 'note',
+  dueTime: 'due_time',
+  tagId: 'tag_id',
+  legacyColor: 'legacy_color',
+  durationDays: 'duration_days',
+  subTaskTitles: 'sub_task_titles_json',
+  position: 'position',
   updatedAt: 'updated_at',
 }
 
@@ -63,20 +116,28 @@ function dateOffset(offset, now = new Date()) {
 
 function createSeedStore(now = new Date()) {
   const nowIso = now.toISOString()
-  const completedAt = new Date(now.getTime() - 52 * 60 * 1000).toISOString()
   const deletedAt = new Date(now.getTime() - 2 * DAY_MS).toISOString()
-  const withDefaults = (task) => ({ ...task, subTasks: task.subTasks || [] })
+  const taskTags = BUILT_IN_TAG_DEFINITIONS.map((tag, position) => ({
+    ...tag,
+    builtIn: true,
+    position,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  }))
 
   return {
     version: STORE_VERSION,
     tasks: [
-      withDefaults({
+      {
         id: crypto.randomUUID(),
         title: 'Dayline 프로토타입 살펴보기',
-        note: '활성 일정과 위젯, 최근 삭제 복구 기능을 확인해 보세요.',
+        note: '기간 일정과 태그, 템플릿 기능을 확인해 보세요.',
+        startDate: dateOffset(0, now),
         dueDate: dateOffset(0, now),
         dueTime: null,
         color: 'coral',
+        tagId: 'builtin-coral',
+        position: 0,
         completed: false,
         completedAt: null,
         deletedAt: null,
@@ -101,49 +162,61 @@ function createSeedStore(now = new Date()) {
             updatedAt: nowIso,
           },
         ],
-      }),
-      withDefaults({
+      },
+      {
         id: crypto.randomUUID(),
         title: '오늘의 우선순위 정리',
         note: '',
+        startDate: dateOffset(0, now),
         dueDate: dateOffset(0, now),
         dueTime: '10:30',
         color: 'violet',
+        tagId: 'builtin-violet',
+        position: 1,
         completed: false,
         completedAt: null,
         deletedAt: null,
         previousCompleted: null,
         createdAt: nowIso,
         updatedAt: nowIso,
-      }),
-      withDefaults({
+        subTasks: [],
+      },
+      {
         id: crypto.randomUUID(),
         title: '주간 계획 초안',
         note: '',
+        startDate: dateOffset(0, now),
         dueDate: dateOffset(1, now),
         dueTime: null,
         color: 'blue',
+        tagId: 'builtin-blue',
+        position: 2,
         completed: false,
         completedAt: null,
         deletedAt: null,
         previousCompleted: null,
         createdAt: nowIso,
         updatedAt: nowIso,
-      }),
-      withDefaults({
+        subTasks: [],
+      },
+      {
         id: crypto.randomUUID(),
         title: '복구 기능 예시 일정',
         note: '최근 삭제에서 복구할 수 있는 예시입니다.',
+        startDate: dateOffset(-3, now),
         dueDate: dateOffset(-3, now),
         dueTime: null,
         color: 'blue',
+        tagId: 'builtin-blue',
+        position: 3,
         completed: true,
         completedAt: new Date(now.getTime() - 4 * DAY_MS).toISOString(),
         deletedAt,
         previousCompleted: true,
         createdAt: new Date(now.getTime() - 6 * DAY_MS).toISOString(),
         updatedAt: deletedAt,
-      }),
+        subTasks: [],
+      },
     ],
     dailyNotes: [
       {
@@ -152,6 +225,24 @@ function createSeedStore(now = new Date()) {
         noteDate: dateOffset(0, now),
         completed: false,
         completedAt: null,
+        position: 0,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ],
+    taskTags,
+    settings: { ...DEFAULT_APP_SETTINGS },
+    taskTemplates: [
+      {
+        id: crypto.randomUUID(),
+        title: '주간 계획',
+        note: '',
+        dueTime: null,
+        tagId: 'builtin-blue',
+        legacyColor: 'blue',
+        durationDays: 7,
+        subTaskTitles: ['목표 정리', '진행 상황 확인'],
+        position: 0,
         createdAt: nowIso,
         updatedAt: nowIso,
       },
@@ -173,6 +264,82 @@ function normalizeTimestamp(value, fallback) {
   return isIsoTimestamp(value) ? new Date(value).toISOString() : fallback
 }
 
+function validPosition(value, fallback = 0) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+function normalizeHex(value, fallback = '#718096') {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
+    ? value.toUpperCase()
+    : fallback
+}
+
+function clampNumber(value, minimum, maximum, fallback) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(maximum, Math.max(minimum, value))
+    : fallback
+}
+
+function sanitizeSettings(settings) {
+  const value = settings && typeof settings === 'object' ? settings : {}
+  return {
+    sidebarSplit: clampNumber(value.sidebarSplit, 20, 80, DEFAULT_APP_SETTINGS.sidebarSplit),
+    widgetSplit: clampNumber(value.widgetSplit, 20, 80, DEFAULT_APP_SETTINGS.widgetSplit),
+    fontScale: clampNumber(value.fontScale, 0.85, 1.3, DEFAULT_APP_SETTINGS.fontScale),
+    themeColor: normalizeHex(value.themeColor, DEFAULT_APP_SETTINGS.themeColor),
+  }
+}
+
+function sanitizeTaskTag(tag, now = new Date(), fallbackPosition = 0) {
+  if (!tag || typeof tag !== 'object') return null
+  if (typeof tag.id !== 'string' || tag.id.length < 1 || tag.id.length > 128) return null
+  if (typeof tag.name !== 'string' || tag.name.trim().length < 1) return null
+  const nowIso = now.toISOString()
+  const definition = BUILT_IN_TAG_DEFINITIONS.find((value) => value.id === tag.id)
+  return {
+    id: tag.id,
+    name: tag.name.trim().slice(0, 80),
+    color: normalizeHex(tag.color, definition?.color),
+    builtIn: Boolean(definition),
+    legacyColor: definition?.legacyColor ?? null,
+    position: validPosition(tag.position, fallbackPosition),
+    createdAt: normalizeTimestamp(tag.createdAt, nowIso),
+    updatedAt: normalizeTimestamp(tag.updatedAt, nowIso),
+  }
+}
+
+function sanitizeTaskTemplate(template, now = new Date(), fallbackPosition = 0) {
+  if (!template || typeof template !== 'object') return null
+  if (typeof template.id !== 'string' || template.id.length < 1 || template.id.length > 128) return null
+  if (typeof template.title !== 'string' || template.title.trim().length < 1) return null
+  const nowIso = now.toISOString()
+  const legacyColor = TASK_COLORS.has(template.legacyColor) ? template.legacyColor : 'coral'
+  return {
+    id: template.id,
+    title: template.title.trim().slice(0, 240),
+    note: typeof template.note === 'string' ? template.note.slice(0, 2000) : '',
+    dueTime: typeof template.dueTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(template.dueTime)
+      ? template.dueTime
+      : null,
+    tagId: typeof template.tagId === 'string' && template.tagId.length <= 128
+      ? template.tagId
+      : Object.prototype.hasOwnProperty.call(template, 'tagId')
+        ? null
+        : LEGACY_TAG_ID_BY_COLOR[legacyColor],
+    legacyColor,
+    durationDays: Math.max(1, validPosition(template.durationDays, 1)),
+    subTaskTitles: Array.isArray(template.subTaskTitles)
+      ? template.subTaskTitles
+        .filter((title) => typeof title === 'string' && title.trim().length > 0)
+        .slice(0, 500)
+        .map((title) => title.trim().slice(0, 240))
+      : [],
+    position: validPosition(template.position, fallbackPosition),
+    createdAt: normalizeTimestamp(template.createdAt, nowIso),
+    updatedAt: normalizeTimestamp(template.updatedAt, nowIso),
+  }
+}
+
 function sanitizeSubTask(subTask, now = new Date()) {
   if (!subTask || typeof subTask !== 'object') return null
   if (typeof subTask.id !== 'string' || subTask.id.length < 1 || subTask.id.length > 128) return null
@@ -191,13 +358,16 @@ function sanitizeSubTask(subTask, now = new Date()) {
   }
 }
 
-function sanitizeTask(task, now = new Date()) {
+function sanitizeTask(task, now = new Date(), fallbackPosition = 0) {
   if (!task || typeof task !== 'object') return null
   if (typeof task.id !== 'string' || task.id.length < 1 || task.id.length > 128) return null
   if (typeof task.title !== 'string' || task.title.trim().length < 1) return null
   if (!isDateKey(task.dueDate)) return null
 
   const nowIso = now.toISOString()
+  const validStartDate = isDateKey(task.startDate) ? task.startDate : task.dueDate
+  if (validStartDate > task.dueDate) return null
+  const startDate = validStartDate
   let completed = Boolean(task.completed)
   let completedAt = completed && isIsoTimestamp(task.completedAt)
     ? new Date(task.completedAt).toISOString()
@@ -229,11 +399,18 @@ function sanitizeTask(task, now = new Date()) {
     id: task.id,
     title: task.title.trim().slice(0, 240),
     note: typeof task.note === 'string' ? task.note.slice(0, 2000) : '',
+    startDate,
     dueDate: task.dueDate,
     dueTime: typeof task.dueTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(task.dueTime)
       ? task.dueTime
       : null,
     color: TASK_COLORS.has(task.color) ? task.color : 'coral',
+    tagId: typeof task.tagId === 'string' && task.tagId.length <= 128
+      ? task.tagId
+      : Object.prototype.hasOwnProperty.call(task, 'tagId')
+        ? null
+        : LEGACY_TAG_ID_BY_COLOR[TASK_COLORS.has(task.color) ? task.color : 'coral'],
+    position: validPosition(task.position, fallbackPosition),
     completed,
     completedAt,
     deletedAt,
@@ -244,7 +421,7 @@ function sanitizeTask(task, now = new Date()) {
   }
 }
 
-function sanitizeDailyNote(note, now = new Date()) {
+function sanitizeDailyNote(note, now = new Date(), fallbackPosition = 0) {
   if (!note || typeof note !== 'object') return null
   if (typeof note.id !== 'string' || note.id.length < 1 || note.id.length > 128) return null
   if (typeof note.content !== 'string' || note.content.trim().length < 1) return null
@@ -259,6 +436,7 @@ function sanitizeDailyNote(note, now = new Date()) {
     completedAt: completed && isIsoTimestamp(note.completedAt)
       ? new Date(note.completedAt).toISOString()
       : null,
+    position: validPosition(note.position, fallbackPosition),
     createdAt: normalizeTimestamp(note.createdAt, nowIso),
     updatedAt: normalizeTimestamp(note.updatedAt, nowIso),
   }
@@ -274,9 +452,12 @@ function rowToTask(row, subTasks = []) {
     id: row.id,
     title: row.title,
     note: row.note,
+    startDate: row.start_date,
     dueDate: row.due_date,
     dueTime: row.due_time,
     color: row.color,
+    tagId: row.tag_id,
+    position: row.position,
     completed: row.completed === 1,
     completedAt: row.completed_at,
     deletedAt: row.deleted_at,
@@ -305,6 +486,54 @@ function rowToDailyNote(row) {
     noteDate: row.note_date,
     completed: row.completed === 1,
     completedAt: row.completed_at,
+    position: row.position,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToTaskTag(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    color: row.color,
+    builtIn: row.built_in === 1,
+    legacyColor: row.legacy_color,
+    position: row.position,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function rowToSettings(row) {
+  return row
+    ? {
+        sidebarSplit: row.sidebar_split,
+        widgetSplit: row.widget_split,
+        fontScale: row.font_scale,
+        themeColor: row.theme_color,
+      }
+    : { ...DEFAULT_APP_SETTINGS }
+}
+
+function rowToTaskTemplate(row) {
+  let subTaskTitles = []
+  try {
+    const parsed = JSON.parse(row.sub_task_titles_json)
+    if (Array.isArray(parsed)) subTaskTitles = parsed.filter((title) => typeof title === 'string')
+  } catch {
+    // Invalid template child data is isolated to that template.
+  }
+  return {
+    id: row.id,
+    title: row.title,
+    note: row.note,
+    dueTime: row.due_time,
+    tagId: row.tag_id,
+    legacyColor: row.legacy_color,
+    durationDays: row.duration_days,
+    subTaskTitles,
+    position: row.position,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -313,6 +542,7 @@ function rowToDailyNote(row) {
 function sqliteValue(field, value) {
   if (field === 'completed') return value ? 1 : 0
   if (field === 'previousCompleted') return value == null ? null : value ? 1 : 0
+  if (field === 'subTaskTitles') return JSON.stringify(value)
   return value
 }
 
@@ -345,6 +575,11 @@ function inTransaction(database, operation) {
     }
     throw error
   }
+}
+
+function tableHasColumn(database, tableName, columnName) {
+  return database.prepare(`PRAGMA table_info(${tableName})`).all()
+    .some((column) => column.name === columnName)
 }
 
 function createSchema(database, appliedAt) {
@@ -527,6 +762,138 @@ function createSchema(database, appliedAt) {
       database.exec('PRAGMA user_version = 2')
     })
   }
+
+  if (currentVersion < 3) {
+    inTransaction(database, () => {
+      database.exec(`
+        ALTER TABLE sync_outbox RENAME TO sync_outbox_v2;
+        CREATE TABLE sync_outbox (
+          mutation_id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          entity_type TEXT NOT NULL CHECK (
+            entity_type IN ('task', 'daily_note', 'task_tag', 'task_template', 'app_settings')
+          ),
+          entity_id TEXT NOT NULL,
+          operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+          base_server_version INTEGER,
+          payload_json TEXT,
+          created_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at TEXT,
+          acknowledged_at TEXT,
+          last_error TEXT
+        ) STRICT;
+        INSERT INTO sync_outbox (
+          mutation_id, profile_id, entity_type, entity_id, operation,
+          base_server_version, payload_json, created_at, attempt_count,
+          next_attempt_at, acknowledged_at, last_error
+        )
+        SELECT mutation_id, profile_id, entity_type, entity_id, operation,
+          base_server_version, payload_json, created_at, attempt_count,
+          next_attempt_at, acknowledged_at, last_error
+        FROM sync_outbox_v2;
+        DROP TABLE sync_outbox_v2;
+
+        CREATE TABLE IF NOT EXISTS task_tags (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+          color TEXT NOT NULL CHECK (
+            length(color) = 7 AND color GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+          ),
+          built_in INTEGER NOT NULL DEFAULT 0 CHECK (built_in IN (0, 1)),
+          legacy_color TEXT CHECK (
+            legacy_color IS NULL OR legacy_color IN ('coral', 'violet', 'sage', 'blue', 'amber')
+          ),
+          position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version > 0)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_task_tags_position
+          ON task_tags(profile_id, position, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+          profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+          sidebar_split REAL NOT NULL CHECK (sidebar_split BETWEEN 20 AND 80),
+          widget_split REAL NOT NULL CHECK (widget_split BETWEEN 20 AND 80),
+          font_scale REAL NOT NULL CHECK (font_scale BETWEEN 0.85 AND 1.3),
+          theme_color TEXT NOT NULL CHECK (
+            length(theme_color) = 7 AND theme_color GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+          ),
+          updated_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS task_templates (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+          title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 240),
+          note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 2000),
+          due_time TEXT CHECK (
+            due_time IS NULL OR (
+              due_time GLOB '[0-2][0-9]:[0-5][0-9]' AND substr(due_time, 1, 2) <= '23'
+            )
+          ),
+          tag_id TEXT REFERENCES task_tags(id) ON DELETE SET NULL,
+          legacy_color TEXT NOT NULL CHECK (legacy_color IN ('coral', 'violet', 'sage', 'blue', 'amber')),
+          duration_days INTEGER NOT NULL DEFAULT 1 CHECK (duration_days >= 1),
+          sub_task_titles_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(sub_task_titles_json)),
+          position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version > 0)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_task_templates_position
+          ON task_templates(profile_id, position, created_at, id);
+      `)
+
+      if (!tableHasColumn(database, 'tasks', 'start_date')) {
+        database.exec(`
+          ALTER TABLE tasks ADD COLUMN start_date TEXT NOT NULL DEFAULT '1970-01-01'
+          CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+        `)
+      }
+      if (!tableHasColumn(database, 'tasks', 'position')) {
+        database.exec('ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0)')
+      }
+      if (!tableHasColumn(database, 'tasks', 'tag_id')) {
+        database.exec('ALTER TABLE tasks ADD COLUMN tag_id TEXT REFERENCES task_tags(id) ON DELETE SET NULL')
+      }
+      if (!tableHasColumn(database, 'daily_notes', 'position')) {
+        database.exec('ALTER TABLE daily_notes ADD COLUMN position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0)')
+      }
+
+      database.exec(`
+        UPDATE tasks SET start_date = due_date
+        WHERE start_date IS NULL OR start_date = '1970-01-01';
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY created_at, id) - 1 AS next_position
+          FROM tasks
+        )
+        UPDATE tasks
+        SET position = (SELECT next_position FROM ranked WHERE ranked.id = tasks.id);
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY profile_id, note_date ORDER BY created_at, id
+          ) - 1 AS next_position
+          FROM daily_notes
+        )
+        UPDATE daily_notes
+        SET position = (SELECT next_position FROM ranked WHERE ranked.id = daily_notes.id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_range
+          ON tasks(profile_id, start_date, due_date, position) WHERE deleted_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_tasks_position
+          ON tasks(profile_id, position, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_daily_notes_position
+          ON daily_notes(profile_id, note_date, position, created_at, id);
+      `)
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 3')
+    })
+  }
 }
 
 function insertSubTask(database, taskId, subTask, position) {
@@ -547,21 +914,29 @@ function insertSubTask(database, taskId, subTask, position) {
   ).changes)
 }
 
+function knownTagId(database, profileId, value) {
+  if (typeof value !== 'string') return null
+  return database.prepare('SELECT id FROM task_tags WHERE id = ? AND profile_id = ?').get(value, profileId)?.id || null
+}
+
 function insertTask(database, profileId, task) {
   const inserted = Number(database.prepare(`
     INSERT INTO tasks (
-      id, profile_id, title, note, due_date, due_time, color, completed,
-      completed_at, deleted_at, previous_completed, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, profile_id, title, note, start_date, due_date, due_time, color, tag_id, position,
+      completed, completed_at, deleted_at, previous_completed, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     task.id,
     profileId,
     task.title,
     task.note,
+    task.startDate,
     task.dueDate,
     task.dueTime,
     task.color,
+    knownTagId(database, profileId, task.tagId),
+    task.position,
     task.completed ? 1 : 0,
     task.completedAt,
     task.deletedAt,
@@ -578,8 +953,8 @@ function insertTask(database, profileId, task) {
 function insertDailyNote(database, profileId, note) {
   return Number(database.prepare(`
     INSERT INTO daily_notes (
-      id, profile_id, content, note_date, completed, completed_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      id, profile_id, content, note_date, completed, completed_at, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     note.id,
@@ -588,9 +963,114 @@ function insertDailyNote(database, profileId, note) {
     note.noteDate,
     note.completed ? 1 : 0,
     note.completedAt,
+    note.position,
     note.createdAt,
     note.updatedAt,
   ).changes)
+}
+
+function insertTaskTag(database, profileId, tag, replaceMutable = false) {
+  const conflictClause = replaceMutable
+    ? `DO UPDATE SET
+        name = excluded.name,
+        color = excluded.color,
+        position = excluded.position,
+        updated_at = excluded.updated_at,
+        row_version = task_tags.row_version + 1`
+    : 'DO NOTHING'
+  return Number(database.prepare(`
+    INSERT INTO task_tags (
+      id, profile_id, name, color, built_in, legacy_color, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) ${conflictClause}
+  `).run(
+    tag.id,
+    profileId,
+    tag.name,
+    tag.color,
+    tag.builtIn ? 1 : 0,
+    tag.legacyColor,
+    tag.position,
+    tag.createdAt,
+    tag.updatedAt,
+  ).changes)
+}
+
+function insertTaskTemplate(database, profileId, template) {
+  return Number(database.prepare(`
+    INSERT INTO task_templates (
+      id, profile_id, title, note, due_time, tag_id, legacy_color,
+      duration_days, sub_task_titles_json, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO NOTHING
+  `).run(
+    template.id,
+    profileId,
+    template.title,
+    template.note,
+    template.dueTime,
+    knownTagId(database, profileId, template.tagId),
+    template.legacyColor,
+    template.durationDays,
+    JSON.stringify(template.subTaskTitles),
+    template.position,
+    template.createdAt,
+    template.updatedAt,
+  ).changes)
+}
+
+function upsertSettings(database, profileId, settings, updatedAt) {
+  database.prepare(`
+    INSERT INTO app_settings (
+      profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id) DO UPDATE SET
+      sidebar_split = excluded.sidebar_split,
+      widget_split = excluded.widget_split,
+      font_scale = excluded.font_scale,
+      theme_color = excluded.theme_color,
+      updated_at = excluded.updated_at
+  `).run(
+    profileId,
+    settings.sidebarSplit,
+    settings.widgetSplit,
+    settings.fontScale,
+    settings.themeColor,
+    updatedAt,
+  )
+}
+
+function ensureProfileV3Defaults(database, profileId, timestamp, assignLegacyTaskTags = false) {
+  for (const [position, definition] of BUILT_IN_TAG_DEFINITIONS.entries()) {
+    insertTaskTag(database, profileId, {
+      ...definition,
+      builtIn: true,
+      position,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+  }
+  database.prepare(`
+    INSERT INTO app_settings (
+      profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id) DO NOTHING
+  `).run(
+    profileId,
+    DEFAULT_APP_SETTINGS.sidebarSplit,
+    DEFAULT_APP_SETTINGS.widgetSplit,
+    DEFAULT_APP_SETTINGS.fontScale,
+    DEFAULT_APP_SETTINGS.themeColor,
+    timestamp,
+  )
+  if (assignLegacyTaskTags) {
+    for (const [legacyColor, tagId] of Object.entries(LEGACY_TAG_ID_BY_COLOR)) {
+      database.prepare(`
+        UPDATE tasks SET tag_id = ?
+        WHERE profile_id = ? AND tag_id IS NULL AND color = ?
+      `).run(tagId, profileId, legacyColor)
+    }
+  }
 }
 
 function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new Date() }) {
@@ -647,16 +1127,32 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
     })
   }
 
+  const v3DefaultsMetaKey = `store_v3_profile_defaults:${profileId}`
+  if (!getMeta.get(v3DefaultsMetaKey)) {
+    inTransaction(database, () => {
+      ensureProfileV3Defaults(database, profileId, openedAt, true)
+      setMeta.run(v3DefaultsMetaKey, openedAt)
+      bumpStoreRevision()
+    })
+  } else {
+    inTransaction(database, () => ensureProfileV3Defaults(database, profileId, openedAt))
+  }
+
   if (!getMeta.get('legacy_json_v1_migration')) {
     const priorMigrationErrorRaw = getMeta.get('legacy_json_v1_error')?.value
     const hasExistingContent = Number(database.prepare(
       'SELECT COUNT(*) AS count FROM tasks WHERE profile_id = ?',
     ).get(profileId).count) > 0 || Number(database.prepare(
       'SELECT COUNT(*) AS count FROM daily_notes WHERE profile_id = ?',
+    ).get(profileId).count) > 0 || Number(database.prepare(
+      'SELECT COUNT(*) AS count FROM task_templates WHERE profile_id = ?',
     ).get(profileId).count) > 0
     let source = 'seeded'
     let tasks = []
     let dailyNotes = []
+    let taskTags = []
+    let settings = null
+    let taskTemplates = []
     let rejectedCount = 0
     let rejectedDailyNoteCount = 0
     let sourceHash = null
@@ -674,18 +1170,33 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
           throw error
         }
         tasks = parsed.tasks
-          .map((task) => sanitizeTask(task, now()))
+          .map((task, index) => sanitizeTask(task, now(), index))
           .filter((task) => {
             if (!task) rejectedCount += 1
             return Boolean(task)
           })
           .filter((task) => isRecoverableTask(task, now().getTime()))
+        const notePositionsByDate = new Map()
         dailyNotes = (Array.isArray(parsed.dailyNotes) ? parsed.dailyNotes : [])
-          .map((note) => sanitizeDailyNote(note, now()))
+          .map((note) => {
+            const noteDate = typeof note?.noteDate === 'string' ? note.noteDate : ''
+            const position = notePositionsByDate.get(noteDate) || 0
+            notePositionsByDate.set(noteDate, position + 1)
+            return sanitizeDailyNote(note, now(), position)
+          })
           .filter((note) => {
             if (!note) rejectedDailyNoteCount += 1
             return Boolean(note)
           })
+        taskTags = (Array.isArray(parsed.taskTags) ? parsed.taskTags : [])
+          .map((tag, index) => sanitizeTaskTag(tag, now(), index))
+          .filter(Boolean)
+        settings = parsed.settings && typeof parsed.settings === 'object'
+          ? sanitizeSettings(parsed.settings)
+          : null
+        taskTemplates = (Array.isArray(parsed.taskTemplates) ? parsed.taskTemplates : [])
+          .map((template, index) => sanitizeTaskTemplate(template, now(), index))
+          .filter(Boolean)
         source = 'imported'
         backupPath = `${legacyJsonPath}.pre-sqlite-backup`
         if (!fs.existsSync(backupPath)) {
@@ -694,6 +1205,9 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
       } catch (error) {
         tasks = []
         dailyNotes = []
+        taskTags = []
+        settings = null
+        taskTemplates = []
         const failedBackupPath = `${legacyJsonPath}.migration-failed-backup`
         let backupErrorCode = null
         try {
@@ -739,6 +1253,7 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
       const seed = createSeedStore(now())
       tasks = seed.tasks
       dailyNotes = seed.dailyNotes
+      taskTemplates = seed.taskTemplates
     } else {
       source = 'existing'
     }
@@ -752,13 +1267,18 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
       })
     } else {
       inTransaction(database, () => {
+        for (const tag of taskTags) insertTaskTag(database, profileId, tag, true)
+        if (settings) upsertSettings(database, profileId, settings, now().toISOString())
         for (const task of tasks) insertTask(database, profileId, task)
         for (const note of dailyNotes) insertDailyNote(database, profileId, note)
+        for (const template of taskTemplates) insertTaskTemplate(database, profileId, template)
         setMeta.run('legacy_json_v1_migration', JSON.stringify({
           status: source,
           importedAt: now().toISOString(),
           importedCount: tasks.length,
           importedDailyNoteCount: dailyNotes.length,
+          importedTagCount: taskTags.length,
+          importedTemplateCount: taskTemplates.length,
           rejectedCount,
           rejectedDailyNoteCount,
           sourceHash,
@@ -771,7 +1291,7 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
   }
 
   const selectTask = database.prepare('SELECT * FROM tasks WHERE id = ? AND profile_id = ?')
-  const selectTasks = database.prepare('SELECT * FROM tasks WHERE profile_id = ? ORDER BY created_at, id')
+  const selectTasks = database.prepare('SELECT * FROM tasks WHERE profile_id = ? ORDER BY position, created_at, id')
   const selectSubTasks = database.prepare(`
     SELECT sub_tasks.* FROM sub_tasks
     JOIN tasks ON tasks.id = sub_tasks.task_id
@@ -784,9 +1304,18 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
     WHERE sub_tasks.id = ? AND sub_tasks.task_id = ? AND tasks.profile_id = ?
   `)
   const selectDailyNotes = database.prepare(`
-    SELECT * FROM daily_notes WHERE profile_id = ? ORDER BY note_date, created_at, id
+    SELECT * FROM daily_notes WHERE profile_id = ? ORDER BY note_date, position, created_at, id
   `)
   const selectDailyNote = database.prepare('SELECT * FROM daily_notes WHERE id = ? AND profile_id = ?')
+  const selectTaskTags = database.prepare(`
+    SELECT * FROM task_tags WHERE profile_id = ? ORDER BY position, created_at, id
+  `)
+  const selectTaskTag = database.prepare('SELECT * FROM task_tags WHERE id = ? AND profile_id = ?')
+  const selectSettings = database.prepare('SELECT * FROM app_settings WHERE profile_id = ?')
+  const selectTaskTemplates = database.prepare(`
+    SELECT * FROM task_templates WHERE profile_id = ? ORDER BY position, created_at, id
+  `)
+  const selectTaskTemplate = database.prepare('SELECT * FROM task_templates WHERE id = ? AND profile_id = ?')
   const profileKind = database.prepare('SELECT kind FROM profiles WHERE id = ?')
 
   function purgeExpired(nowDate = now()) {
@@ -810,6 +1339,9 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
       migrationWarning: readMigrationWarning(),
       tasks: selectTasks.all(profileId).map((row) => rowToTask(row, subTasksByTask.get(row.id) || [])),
       dailyNotes: selectDailyNotes.all(profileId).map(rowToDailyNote),
+      taskTags: selectTaskTags.all(profileId).map(rowToTaskTag),
+      settings: rowToSettings(selectSettings.get(profileId)),
+      taskTemplates: selectTaskTemplates.all(profileId).map(rowToTaskTemplate),
     }
   }
 
@@ -841,10 +1373,17 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
 
   function applyStoreMutations(rawMutations) {
     const mutations = Array.isArray(rawMutations) ? rawMutations : []
+    const orderedMutations = [
+      ...mutations.filter((mutation) => mutation?.type === 'tag:create'),
+      ...mutations.filter((mutation) => mutation?.type !== 'tag:create'),
+    ]
     inTransaction(database, () => {
       const affectedTaskIds = new Set()
       const taskBaseVersions = new Map()
       const affectedDailyNotes = new Map()
+      const affectedTags = new Map()
+      const affectedTemplates = new Map()
+      let settingsAffected = false
       const syncState = profileKind.get(profileId)?.kind === 'linked' ? 'pending' : 'local_only'
 
       const markTask = (taskId, serverVersion) => {
@@ -852,7 +1391,7 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
         if (!taskBaseVersions.has(taskId)) taskBaseVersions.set(taskId, serverVersion ?? null)
       }
 
-      for (const rawMutation of mutations) {
+      for (const rawMutation of orderedMutations) {
         if (!rawMutation || typeof rawMutation !== 'object') continue
         const mutation = rawMutation.type === 'create'
           ? { ...rawMutation, type: 'task:create' }
@@ -876,8 +1415,24 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
           )
           if (requestedFields.length === 0) continue
           if (currentTask.deletedAt && !requestedFields.includes('deletedAt')) continue
+          if (requestedFields.includes('startDate') || requestedFields.includes('dueDate')) {
+            const nextStartDate = requestedFields.includes('startDate')
+              ? mutation.changes.startDate
+              : currentTask.startDate
+            const nextDueDate = requestedFields.includes('dueDate')
+              ? mutation.changes.dueDate
+              : currentTask.dueDate
+            if (!isDateKey(nextStartDate) || !isDateKey(nextDueDate) || nextStartDate > nextDueDate) {
+              const error = new Error('Invalid Dayline task date range')
+              error.code = 'DAYLINE_INVALID_TASK_RANGE'
+              throw error
+            }
+          }
           const normalized = sanitizeTask({ ...currentTask, ...mutation.changes }, now())
           if (!normalized) continue
+          if (requestedFields.includes('tagId')) {
+            normalized.tagId = knownTagId(database, profileId, normalized.tagId)
+          }
           if (!currentTask.deletedAt && normalized.deletedAt) {
             // A stale renderer may delete after another window completed the task.
             // The database row is authoritative for the state that recovery restores.
@@ -1006,6 +1561,125 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
             operation: 'delete',
             baseVersion: affectedDailyNotes.get(mutation.id)?.baseVersion ?? row.server_version,
           })
+          continue
+        }
+
+        if (mutation.type === 'tag:create') {
+          const tag = sanitizeTaskTag(mutation.tag, now())
+          if (!tag || tag.builtIn) continue
+          if (insertTaskTag(database, profileId, { ...tag, builtIn: false, legacyColor: null }) > 0) {
+            affectedTags.set(tag.id, 'upsert')
+          }
+          continue
+        }
+
+        if (mutation.type === 'tag:patch' && typeof mutation.id === 'string') {
+          const row = selectTaskTag.get(mutation.id, profileId)
+          if (!row || !mutation.changes || typeof mutation.changes !== 'object') continue
+          const requestedFields = TAG_PATCHABLE_FIELDS.filter((field) =>
+            Object.prototype.hasOwnProperty.call(mutation.changes, field),
+          )
+          if (requestedFields.length === 0) continue
+          const normalized = sanitizeTaskTag({ ...rowToTaskTag(row), ...mutation.changes }, now(), row.position)
+          if (!normalized) continue
+          const assignments = requestedFields.map((field) => `${TAG_COLUMN_BY_FIELD[field]} = ?`)
+          const values = requestedFields.map((field) => normalized[field])
+          const updated = Number(database.prepare(`
+            UPDATE task_tags
+            SET ${assignments.join(', ')}, row_version = row_version + 1
+            WHERE id = ? AND profile_id = ?
+          `).run(...values, mutation.id, profileId).changes)
+          if (updated > 0) affectedTags.set(mutation.id, 'upsert')
+          continue
+        }
+
+        if (mutation.type === 'tag:delete' && typeof mutation.id === 'string') {
+          const tag = selectTaskTag.get(mutation.id, profileId)
+          if (!tag || tag.built_in === 1) continue
+          const referencedTasks = database.prepare(`
+            SELECT id, server_version FROM tasks WHERE profile_id = ? AND tag_id = ?
+          `).all(profileId, mutation.id)
+          const referencedTemplates = database.prepare(`
+            SELECT id FROM task_templates WHERE profile_id = ? AND tag_id = ?
+          `).all(profileId, mutation.id)
+          const deleted = Number(database.prepare(`
+            DELETE FROM task_tags WHERE id = ? AND profile_id = ? AND built_in = 0
+          `).run(mutation.id, profileId).changes)
+          if (deleted > 0) affectedTags.set(mutation.id, 'delete')
+          if (deleted > 0 && referencedTasks.length > 0) {
+            const timestamp = now().toISOString()
+            for (const task of referencedTasks) {
+              database.prepare(`
+                UPDATE tasks
+                SET updated_at = ?, row_version = row_version + 1, sync_state = ?
+                WHERE id = ? AND profile_id = ?
+              `).run(timestamp, syncState, task.id, profileId)
+              markTask(task.id, task.server_version)
+            }
+          }
+          if (deleted > 0 && referencedTemplates.length > 0) {
+            const timestamp = now().toISOString()
+            for (const template of referencedTemplates) {
+              database.prepare(`
+                UPDATE task_templates
+                SET updated_at = ?, row_version = row_version + 1
+                WHERE id = ? AND profile_id = ?
+              `).run(timestamp, template.id, profileId)
+              affectedTemplates.set(template.id, 'upsert')
+            }
+          }
+          continue
+        }
+
+        if (mutation.type === 'settings:patch' && mutation.changes && typeof mutation.changes === 'object') {
+          const current = rowToSettings(selectSettings.get(profileId))
+          const settings = sanitizeSettings({ ...current, ...mutation.changes })
+          upsertSettings(database, profileId, settings, now().toISOString())
+          settingsAffected = true
+          continue
+        }
+
+        if (mutation.type === 'template:create') {
+          const template = sanitizeTaskTemplate(mutation.template, now())
+          if (!template) continue
+          template.tagId = knownTagId(database, profileId, template.tagId)
+          if (insertTaskTemplate(database, profileId, template) > 0) {
+            affectedTemplates.set(template.id, 'upsert')
+          }
+          continue
+        }
+
+        if (mutation.type === 'template:patch' && typeof mutation.id === 'string') {
+          const row = selectTaskTemplate.get(mutation.id, profileId)
+          if (!row || !mutation.changes || typeof mutation.changes !== 'object') continue
+          const requestedFields = TEMPLATE_PATCHABLE_FIELDS.filter((field) =>
+            Object.prototype.hasOwnProperty.call(mutation.changes, field),
+          )
+          if (requestedFields.length === 0) continue
+          const normalized = sanitizeTaskTemplate(
+            { ...rowToTaskTemplate(row), ...mutation.changes },
+            now(),
+            row.position,
+          )
+          if (!normalized) continue
+          if (requestedFields.includes('tagId')) {
+            normalized.tagId = knownTagId(database, profileId, normalized.tagId)
+          }
+          const assignments = requestedFields.map((field) => `${TEMPLATE_COLUMN_BY_FIELD[field]} = ?`)
+          const values = requestedFields.map((field) => sqliteValue(field, normalized[field]))
+          const updated = Number(database.prepare(`
+            UPDATE task_templates
+            SET ${assignments.join(', ')}, row_version = row_version + 1
+            WHERE id = ? AND profile_id = ?
+          `).run(...values, mutation.id, profileId).changes)
+          if (updated > 0) affectedTemplates.set(mutation.id, 'upsert')
+          continue
+        }
+
+        if (mutation.type === 'template:delete' && typeof mutation.id === 'string') {
+          const deleted = Number(database.prepare('DELETE FROM task_templates WHERE id = ? AND profile_id = ?')
+            .run(mutation.id, profileId).changes)
+          if (deleted > 0) affectedTemplates.set(mutation.id, 'delete')
         }
       }
 
@@ -1033,6 +1707,12 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
         }
       }
 
+      // Referenced tag rows must reach a future server before tasks/templates that use them.
+      for (const [tagId, operation] of affectedTags) {
+        if (operation !== 'upsert') continue
+        const row = selectTaskTag.get(tagId, profileId)
+        enqueueSyncMutation('task_tag', tagId, 'upsert', row ? rowToTaskTag(row) : null, null)
+      }
       for (const taskId of affectedTaskIds) {
         const row = selectTask.get(taskId, profileId)
         if (!row) continue
@@ -1056,6 +1736,29 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
           sync.operation,
           row ? rowToDailyNote(row) : null,
           sync.baseVersion,
+        )
+      }
+      for (const [templateId, operation] of affectedTemplates) {
+        const row = selectTaskTemplate.get(templateId, profileId)
+        enqueueSyncMutation(
+          'task_template',
+          templateId,
+          operation,
+          row ? rowToTaskTemplate(row) : null,
+          null,
+        )
+      }
+      // Tag deletes follow all payloads that clear their references.
+      for (const [tagId, operation] of affectedTags) {
+        if (operation === 'delete') enqueueSyncMutation('task_tag', tagId, 'delete', null, null)
+      }
+      if (settingsAffected) {
+        enqueueSyncMutation(
+          'app_settings',
+          profileId,
+          'upsert',
+          rowToSettings(selectSettings.get(profileId)),
+          null,
         )
       }
 

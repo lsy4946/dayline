@@ -1,11 +1,14 @@
-import type { SubTask, SubTaskPatch, Task, TaskColor } from '../types'
+import type { SubTask, SubTaskPatch, Task, TaskColor, TaskTemplate } from '../types'
+import { addDaysKey } from './date'
 
 export interface TaskDraft {
   title: string
   note: string
+  startDate: string
   dueDate: string
   dueTime: string | null
   color: TaskColor
+  tagId: string | null
   subTasks: SubTask[]
 }
 
@@ -62,14 +65,51 @@ export function getTaskEditChanges(
     draft: {
       ...(draft.title !== task.title ? { title: draft.title } : {}),
       ...(draft.note !== task.note ? { note: draft.note } : {}),
+      ...(draft.startDate !== task.startDate ? { startDate: draft.startDate } : {}),
       ...(draft.dueDate !== task.dueDate ? { dueDate: draft.dueDate } : {}),
       ...(draft.dueTime !== task.dueTime ? { dueTime: draft.dueTime } : {}),
       ...(draft.color !== task.color ? { color: draft.color } : {}),
+      ...(draft.tagId !== task.tagId ? { tagId: draft.tagId } : {}),
     },
     ...(hasSubTaskChanges ? { subTasks: { created, patched, deletedIds } } : {}),
     ...(completed !== task.completed
       ? { completed, ...(cascadeSubTasks ? { cascadeSubTasks: true } : {}) }
       : {}),
+  }
+}
+
+export function createTaskFromTemplate(
+  template: TaskTemplate,
+  startDate: string,
+  position: number,
+  now = new Date(),
+  createId: () => string = () => crypto.randomUUID(),
+): Task {
+  const timestamp = now.toISOString()
+  return {
+    id: createId(),
+    title: template.title,
+    note: template.note,
+    startDate,
+    dueDate: addDaysKey(startDate, Math.max(1, template.durationDays) - 1),
+    dueTime: template.dueTime,
+    color: template.legacyColor,
+    tagId: template.tagId,
+    position,
+    completed: false,
+    completedAt: null,
+    deletedAt: null,
+    previousCompleted: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    subTasks: template.subTaskTitles.map((title) => ({
+      id: createId(),
+      title,
+      completed: false,
+      completedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })),
   }
 }
 

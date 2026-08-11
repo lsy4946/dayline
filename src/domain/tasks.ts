@@ -1,4 +1,5 @@
 import type { Task } from '../types'
+import { dateRangeContains, dateRangesOverlap } from './date'
 
 export const RETENTION_DAYS = 30
 export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
@@ -27,6 +28,7 @@ export function deletedTasks(tasks: Task[], now = Date.now()): Task[] {
 
 export function sortTasks(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
+    if (a.position !== b.position) return a.position - b.position
     if (Boolean(a.dueTime) !== Boolean(b.dueTime)) return a.dueTime ? -1 : 1
     if (a.dueTime && b.dueTime && a.dueTime !== b.dueTime) {
       return a.dueTime.localeCompare(b.dueTime)
@@ -34,6 +36,33 @@ export function sortTasks(tasks: Task[]): Task[] {
     const createdOrder = a.createdAt.localeCompare(b.createdAt)
     return createdOrder !== 0 ? createdOrder : a.id.localeCompare(b.id)
   })
+}
+
+export function taskOccursOnDate(task: Task, dateKey: string): boolean {
+  return dateRangeContains(task.startDate, task.dueDate, dateKey)
+}
+
+export function taskOverlapsRange(task: Task, startDate: string, endDate: string): boolean {
+  return dateRangesOverlap(task.startDate, task.dueDate, startDate, endDate)
+}
+
+export function reorderPositioned<T extends { id: string; position: number; updatedAt: string }>(
+  items: T[],
+  orderedIds: string[],
+  now = new Date(),
+): T[] {
+  const positions = new Map(orderedIds.map((id, position) => [id, position]))
+  const timestamp = now.toISOString()
+  return items.map((item) => {
+    const position = positions.get(item.id)
+    return position == null || position === item.position
+      ? item
+      : { ...item, position, updatedAt: timestamp }
+  })
+}
+
+export function nextPosition(items: Array<{ position: number }>): number {
+  return items.reduce((maximum, item) => Math.max(maximum, item.position), -1) + 1
 }
 
 export function setTaskCompleted(

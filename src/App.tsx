@@ -1,25 +1,31 @@
 import {
   ArchiveRestore,
   CalendarDays,
+  CalendarRange,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock3,
   CornerDownRight,
   FileText,
+  Filter,
   GripHorizontal,
+  GripVertical,
   History,
-  LayoutGrid,
   Lock,
   Maximize2,
   MonitorUp,
+  Palette,
   Pin,
   PinOff,
   Plus,
+  Repeat2,
   RotateCcw,
   Save,
   Search,
+  Settings2,
   Sparkles,
+  Tags,
   Trash2,
   Unlock,
   X,
@@ -31,23 +37,29 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type CSSProperties,
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
 import {
   addDaysKey,
   calendarDays,
+  dateRangeContains,
   formatCompactDate,
   formatFullDate,
   formatMonthTitle,
   fromDateKey,
   getWeekendKey,
+  inclusiveDateKeys,
   shiftMonth,
   startOfMonth,
   todayKey,
   weekDaysAround,
 } from './domain/date'
+import { layoutCalendarTaskSegments, type CalendarTaskSegment } from './domain/calendarLayout'
+import { getCalendarDayTone, getKoreanHoliday } from './domain/koreanHolidays'
 import {
   advanceTaskState,
   deletedTasks,
@@ -56,23 +68,31 @@ import {
   setTaskCompleted,
   softDeleteTask,
   sortTasks,
+  nextPosition,
+  reorderPositioned,
+  taskOccursOnDate,
+  taskOverlapsRange,
   toggleSubTask,
   visibleTasks,
 } from './domain/tasks'
 import {
   applyTaskEditChanges,
+  createTaskFromTemplate,
   getTaskEditChanges,
   type TaskDraft,
   type TaskEditChanges,
 } from './domain/taskDraft'
 import { loadStore, saveStore, subscribeToStore } from './lib/storage'
 import type {
+  AppSettings,
   DailyNote,
   DaylineStore,
   LegacyMigrationWarning,
   SubTask,
   Task,
   TaskColor,
+  TaskTag,
+  TaskTemplate,
   WidgetState,
 } from './types'
 
@@ -85,15 +105,165 @@ interface ToastMessage {
   onAction?: () => void
 }
 
-const COLOR_OPTIONS: Array<{ value: TaskColor; label: string }> = [
-  { value: 'coral', label: '코랄' },
-  { value: 'violet', label: '라일락' },
-  { value: 'sage', label: '세이지' },
-  { value: 'blue', label: '블루' },
-  { value: 'amber', label: '앰버' },
-]
-
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
+const TAG_PALETTE = ['#ef6f61', '#8b6fd6', '#6f9f7d', '#4f86c6', '#d99a32', '#d66787', '#3f9b96', '#5c6ac4', '#718096']
+const LEGACY_COLORS: Record<TaskColor, string> = {
+  coral: '#ec6d5c',
+  violet: '#8e73b3',
+  sage: '#609078',
+  blue: '#6385a8',
+  amber: '#bd8236',
+}
+const UNTAGGED_FILTER = '__untagged__'
+
+type RailPanel = 'templates' | 'filters' | 'tags' | 'appearance' | null
+type ReorderDirection = -1 | 1
+
+interface TemplateDraft {
+  title: string
+  note: string
+  dueTime: string | null
+  tagId: string | null
+  legacyColor: TaskColor
+  durationDays: number
+  subTaskTitles: string[]
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.max(minimum, Math.min(maximum, value))
+}
+
+function normalizedHex(value: string, fallback = '#255f4b') {
+  return /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback
+}
+
+function colorChannels(value: string) {
+  const safe = normalizedHex(value, '#000000').slice(1)
+  return [0, 2, 4].map((offset) => Number.parseInt(safe.slice(offset, offset + 2), 16))
+}
+
+function mixHex(foreground: string, background: string, foregroundWeight: number) {
+  const front = colorChannels(foreground)
+  const back = colorChannels(background)
+  const weight = clamp(foregroundWeight, 0, 1)
+  return `#${front.map((channel, index) => Math.round(channel * weight + back[index] * (1 - weight))
+    .toString(16).padStart(2, '0')).join('')}`
+}
+
+function relativeLuminance(color: string) {
+  const channels = colorChannels(color).map((channel) => {
+    const value = channel / 255
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+  })
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+}
+
+function contrastRatio(first: string, second: string) {
+  const firstLuminance = relativeLuminance(first)
+  const secondLuminance = relativeLuminance(second)
+  const lighter = Math.max(firstLuminance, secondLuminance)
+  const darker = Math.min(firstLuminance, secondLuminance)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function accessibleAccent(value: string) {
+  const raw = normalizedHex(value)
+  if (contrastRatio(raw, '#ffffff') >= 4.5) return raw
+  for (let rawWeight = 0.9; rawWeight >= 0.2; rawWeight -= 0.05) {
+    const candidate = mixHex(raw, '#000000', rawWeight)
+    if (contrastRatio(candidate, '#ffffff') >= 4.5) return candidate
+  }
+  return '#343b37'
+}
+
+function taskColor(task: Pick<Task, 'tagId' | 'color'>, tags: TaskTag[]) {
+  return tags.find((tag) => tag.id === task.tagId)?.color ?? LEGACY_COLORS[task.color]
+}
+
+function taskVisualStyle(task: Pick<Task, 'tagId' | 'color'>, tags: TaskTag[]): CSSProperties {
+  const rawColor = normalizedHex(taskColor(task, tags), LEGACY_COLORS[task.color])
+  const color = accessibleAccent(rawColor)
+  return {
+    '--task-color': color,
+    '--task-raw': rawColor,
+    '--task-bg': mixHex(rawColor, '#ffffff', 0.14),
+    '--task-soft': mixHex(rawColor, '#ffffff', 0.07),
+  } as CSSProperties
+}
+
+function themeVariables(settings: AppSettings): Record<string, string> {
+  const rawTheme = normalizedHex(settings.themeColor)
+  const theme = accessibleAccent(rawTheme)
+  const fontScale = clamp(settings.fontScale, 0.85, 1.3)
+  const fontVariables = Object.fromEntries(
+    Array.from({ length: 32 }, (_, index) => {
+      const size = index + 1
+      return [`--font-${size}`, `${Number((size * fontScale).toFixed(2))}px`]
+    }),
+  )
+  return {
+    ...fontVariables,
+    '--theme-color': rawTheme,
+    '--green': theme,
+    '--green-deep': mixHex(theme, '#000000', 0.82),
+    '--green-soft': mixHex(rawTheme, '#ffffff', 0.13),
+  }
+}
+
+function sortedPositioned<T extends { position: number; createdAt: string; id: string }>(items: T[]) {
+  return [...items].sort((left, right) => left.position - right.position
+    || left.createdAt.localeCompare(right.createdAt)
+    || left.id.localeCompare(right.id))
+}
+
+function movedIds(ids: string[], id: string, direction: ReorderDirection) {
+  const from = ids.indexOf(id)
+  const to = clamp(from + direction, 0, ids.length - 1)
+  if (from < 0 || from === to) return ids
+  const next = [...ids]
+  next.splice(from, 1)
+  next.splice(to, 0, id)
+  return next
+}
+
+function droppedIds(ids: string[], draggedId: string, targetId: string) {
+  const from = ids.indexOf(draggedId)
+  const target = ids.indexOf(targetId)
+  if (from < 0 || target < 0 || from === target) return ids
+  const next = [...ids]
+  next.splice(from, 1)
+  next.splice(target, 0, draggedId)
+  return next
+}
+
+function reorderTaskSubset(tasks: Task[], orderedIds: string[], now = new Date()) {
+  const selectedIds = new Set(orderedIds)
+  const availablePositions = tasks
+    .filter((task) => selectedIds.has(task.id))
+    .map((task) => task.position)
+    .sort((left, right) => left - right)
+  if (availablePositions.length !== orderedIds.length) return tasks
+  const nextPositions = new Map(orderedIds.map((id, index) => [id, availablePositions[index]]))
+  const timestamp = now.toISOString()
+  return tasks.map((task) => {
+    const position = nextPositions.get(task.id)
+    return position == null || position === task.position
+      ? task
+      : { ...task, position, updatedAt: timestamp }
+  })
+}
+
+function normalizedRange(first: string, second: string) {
+  return first <= second
+    ? { startDate: first, endDate: second }
+    : { startDate: second, endDate: first }
+}
+
+function taskRangeLabel(task: Pick<Task, 'startDate' | 'dueDate'>) {
+  return task.startDate === task.dueDate
+    ? formatCompactDate(task.dueDate)
+    : `${formatCompactDate(task.startDate)} – ${formatCompactDate(task.dueDate)}`
+}
 const DIALOG_FOCUSABLE = [
   'button:not([disabled])',
   'input:not([disabled])',
@@ -147,6 +317,14 @@ function useTaskStore() {
     revision: 0,
     tasks: [],
     dailyNotes: [],
+    taskTags: [],
+    settings: {
+      sidebarSplit: 50,
+      widgetSplit: 58,
+      fontScale: 1,
+      themeColor: '#255f4b',
+    },
+    taskTemplates: [],
     migrationWarning: null,
   })
   const [loading, setLoading] = useState(true)
@@ -210,6 +388,11 @@ function IconButton({
   className = '',
   active = false,
   disabled = false,
+  id,
+  controls,
+  expanded,
+  railAction,
+  autoFocus = false,
 }: {
   label: string
   children: ReactNode
@@ -217,18 +400,145 @@ function IconButton({
   className?: string
   active?: boolean
   disabled?: boolean
+  id?: string
+  controls?: string
+  expanded?: boolean
+  railAction?: 'templates' | 'filters' | 'tags' | 'appearance' | 'recovery'
+  autoFocus?: boolean
 }) {
   return (
     <button
       type="button"
+      id={id}
       className={`icon-button ${active ? 'is-active' : ''} ${className}`}
       aria-label={label}
+      aria-controls={controls}
+      aria-expanded={expanded}
+      data-rail-action={railAction}
       title={label}
       onClick={onClick}
       disabled={disabled}
+      autoFocus={autoFocus}
     >
       {children}
     </button>
+  )
+}
+
+function ReorderHandle({
+  kind,
+  id,
+  label,
+  onMove,
+}: {
+  kind: 'task' | 'daily-note' | 'calendar-task'
+  id: string
+  label: string
+  onMove: (id: string, direction: ReorderDirection) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="reorder-handle"
+      draggable
+      data-reorder-kind={kind}
+      data-reorder-id={id}
+      aria-label={`${label} 순서 이동`}
+      aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+      title="드래그하여 순서 변경 · Alt+↑/↓"
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+      }}
+      onDragStart={(event) => {
+        event.stopPropagation()
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData(`application/x-dayline-${kind}`, id)
+      }}
+      onKeyDown={(event) => {
+        if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+        event.preventDefault()
+        event.stopPropagation()
+        onMove(id, event.key === 'ArrowUp' ? -1 : 1)
+      }}
+    >
+      <GripVertical size={15} />
+    </button>
+  )
+}
+
+function SplitHandle({
+  qa,
+  value,
+  onPreview,
+  onCommit,
+}: {
+  qa: 'sidebar-splitter' | 'widget-splitter'
+  value: number
+  onPreview: (value: number) => void
+  onCommit: (value: number) => void
+}) {
+  const calculate = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const container = event.currentTarget.closest<HTMLElement>('[data-split-container]')
+    if (!container) return value
+    const bounds = container.getBoundingClientRect()
+    return clamp(((event.clientY - bounds.top) / bounds.height) * 100, 20, 80)
+  }
+
+  const changeByKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    let next: number | null = null
+    if (event.key === 'ArrowUp') next = value - (event.shiftKey ? 10 : 2)
+    if (event.key === 'ArrowDown') next = value + (event.shiftKey ? 10 : 2)
+    if (event.key === 'Home') next = 20
+    if (event.key === 'End') next = 80
+    if (next == null) return
+    event.preventDefault()
+    const safe = clamp(next, 20, 80)
+    onPreview(safe)
+    onCommit(safe)
+  }
+
+  return (
+    <div
+      className="split-handle"
+      data-qa={qa}
+      role="separator"
+      tabIndex={0}
+      aria-orientation="horizontal"
+      aria-valuemin={20}
+      aria-valuemax={80}
+      aria-valuenow={Math.round(value)}
+      aria-label={qa === 'sidebar-splitter' ? '퀵 노트와 일정 영역 크기 조절' : '위젯 일정과 퀵 노트 영역 크기 조절'}
+      onDoubleClick={() => {
+        onPreview(50)
+        onCommit(50)
+      }}
+      onKeyDown={changeByKeyboard}
+      onPointerDown={(event) => {
+        event.preventDefault()
+        event.currentTarget.setPointerCapture(event.pointerId)
+        onPreview(calculate(event))
+      }}
+      onPointerMove={(event) => {
+        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+        onPreview(calculate(event))
+      }}
+      onPointerUp={(event) => {
+        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+        const next = calculate(event)
+        event.currentTarget.releasePointerCapture(event.pointerId)
+        onPreview(next)
+        onCommit(next)
+      }}
+      onPointerCancel={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId)
+        }
+        onPreview(value)
+      }}
+    >
+      <span />
+    </div>
   )
 }
 
@@ -244,94 +554,182 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
 
 function TaskChip({
   task,
+  tags,
+  segment,
   onOpen,
   onSecondaryAction,
+  onMove,
+  onDropTask,
+  onDropTemplate,
 }: {
   task: Task
+  tags: TaskTag[]
+  segment: CalendarTaskSegment
   onOpen: (task: Task) => void
   onSecondaryAction: (id: string) => void
+  onMove: (id: string, direction: ReorderDirection) => void
+  onDropTask: (draggedId: string, targetId: string) => void
+  onDropTemplate: (templateId: string, clientX: number, clientY: number) => void
 }) {
+  const segmentStyle = {
+    ...taskVisualStyle(task, tags),
+    gridColumn: `${segment.startColumn + 1} / ${segment.endColumn + 2}`,
+    gridRow: segment.weekRow + 1,
+    '--calendar-task-lane': segment.lane,
+  } as CSSProperties
+
   return (
-    <button
-      type="button"
+    <div
       data-task-id={task.id}
-      className={`task-chip color-${task.color} ${task.completed ? 'is-completed' : ''}`}
-      onClick={(event) => {
-        event.stopPropagation()
-        onOpen(task)
+      data-task-start={task.startDate}
+      data-task-end={task.dueDate}
+      data-segment-start={segment.segmentStart}
+      data-segment-end={segment.segmentEnd}
+      data-week-row={segment.weekRow}
+      data-lane={segment.lane}
+      data-continues-before={String(segment.continuesBefore)}
+      data-continues-after={String(segment.continuesAfter)}
+      className={`calendar-task-segment task-chip color-${task.color} ${task.completed ? 'is-completed' : ''} ${segment.continuesBefore ? 'is-continues-before' : ''} ${segment.continuesAfter ? 'is-continues-after' : ''}`}
+      style={segmentStyle}
+      onDragOver={(event) => {
+        const types = event.dataTransfer.types
+        if (types.includes('application/x-dayline-calendar-task')) {
+          event.preventDefault()
+          event.stopPropagation()
+          event.dataTransfer.dropEffect = 'move'
+        } else if (types.includes('application/x-dayline-template')) {
+          event.preventDefault()
+          event.stopPropagation()
+          event.dataTransfer.dropEffect = 'copy'
+        }
       }}
-      onContextMenu={(event) => {
+      onDrop={(event) => {
+        const draggedTaskId = event.dataTransfer.getData('application/x-dayline-calendar-task')
+        if (draggedTaskId) {
+          event.preventDefault()
+          event.stopPropagation()
+          onDropTask(draggedTaskId, task.id)
+          return
+        }
+        const templateId = event.dataTransfer.getData('application/x-dayline-template')
+        if (!templateId) return
         event.preventDefault()
         event.stopPropagation()
-        onSecondaryAction(task.id)
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
-        event.preventDefault()
-        event.stopPropagation()
-        onSecondaryAction(task.id)
+        onDropTemplate(templateId, event.clientX, event.clientY)
       }}
       title={`${task.title} · 좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
-      aria-label={`${task.title}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
     >
-      <span className="task-chip-dot">{task.completed && <Check size={9} strokeWidth={3} />}</span>
-      {task.dueTime && <span className="task-chip-time">{task.dueTime}</span>}
-      <span className="task-chip-title">{task.title}</span>
-    </button>
+      <button
+        type="button"
+        className="calendar-task-main"
+        aria-label={`${task.title}, ${formatCompactDate(segment.segmentStart)}${segment.segmentStart === segment.segmentEnd ? '' : `부터 ${formatCompactDate(segment.segmentEnd)}까지`}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
+        onClick={(event) => {
+          event.stopPropagation()
+          onOpen(task)
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          onSecondaryAction(task.id)
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+          event.preventDefault()
+          event.stopPropagation()
+          onSecondaryAction(task.id)
+        }}
+      >
+        <span className="task-chip-dot">{task.completed && <Check size={9} strokeWidth={3} />}</span>
+        {task.dueTime && <span className="task-chip-time">{task.dueTime}</span>}
+        <span className="task-chip-title">{task.title}</span>
+      </button>
+      <ReorderHandle kind="calendar-task" id={task.id} label={task.title} onMove={onMove} />
+    </div>
   )
 }
 
 function TaskRow({
   task,
+  tags,
   onOpen,
   onSecondaryAction,
   onSubTaskToggle,
+  onMove,
+  onDropTask,
   compact = false,
   showSubTasks = false,
+  reorderable = false,
 }: {
   task: Task
+  tags: TaskTag[]
   onOpen: (task: Task) => void
   onSecondaryAction: (id: string) => void
   onSubTaskToggle?: (taskId: string, subTaskId: string) => void
+  onMove?: (id: string, direction: ReorderDirection) => void
+  onDropTask?: (draggedId: string, targetId: string) => void
   compact?: boolean
   showSubTasks?: boolean
+  reorderable?: boolean
 }) {
+  const tag = tags.find((item) => item.id === task.tagId)
   return (
     <article
       data-task-id={task.id}
       className={`task-row color-${task.color} ${task.completed ? 'is-completed' : ''} ${compact ? 'is-compact' : ''}`}
+      style={taskVisualStyle(task, tags)}
+      onDragOver={(event) => {
+        if (!reorderable || !event.dataTransfer.types.includes('application/x-dayline-task')) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+      }}
+      onDrop={(event) => {
+        if (!reorderable) return
+        const draggedId = event.dataTransfer.getData('application/x-dayline-task')
+        if (!draggedId) return
+        event.preventDefault()
+        onDropTask?.(draggedId, task.id)
+      }}
       onContextMenu={(event) => {
         event.preventDefault()
         onSecondaryAction(task.id)
       }}
     >
-      <button
-        type="button"
-        className="task-row-main"
-        onClick={() => onOpen(task)}
-        onKeyDown={(event) => {
-          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
-          event.preventDefault()
-          onSecondaryAction(task.id)
-        }}
-        aria-label={`${task.title}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
-        title={`좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
-      >
-        <span className="task-status" aria-hidden="true">
-          {task.completed ? <Check size={13} strokeWidth={3} /> : <span />}
-        </span>
-        <span className="task-copy">
-          <span className="task-title">{task.title}</span>
-          {showSubTasks && task.subTasks.length > 0 && (
-            <span className="task-subtask-summary">
-              {task.subTasks.filter((subTask) => subTask.completed).length}/{task.subTasks.length} 완료
+      <div className="task-row-head">
+        <button
+          type="button"
+          className="task-row-main"
+          onClick={() => onOpen(task)}
+          onKeyDown={(event) => {
+            if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+            event.preventDefault()
+            onSecondaryAction(task.id)
+          }}
+          aria-label={`${task.title}, ${task.completed ? '비활성' : '활성'} 일정. 상세 보기`}
+          title={`좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
+        >
+          <span className="task-status" aria-hidden="true">
+            {task.completed ? <Check size={13} strokeWidth={3} /> : <span />}
+          </span>
+          <span className="task-copy">
+            <span className="task-title">{task.title}</span>
+            <span className="task-row-labels">
+              {tag && <span className="task-tag-label">{tag.name}</span>}
+              {task.startDate !== task.dueDate && <span>{taskRangeLabel(task)}</span>}
+              {showSubTasks && task.subTasks.length > 0 && (
+                <span className="task-subtask-summary">
+                  {task.subTasks.filter((subTask) => subTask.completed).length}/{task.subTasks.length} 완료
+                </span>
+              )}
             </span>
+          </span>
+          {task.dueTime && (
+            <span className="task-due-time"><Clock3 size={12} /> {task.dueTime}</span>
           )}
-        </span>
-        {task.dueTime && (
-          <span className="task-due-time"><Clock3 size={12} /> {task.dueTime}</span>
+        </button>
+        {reorderable && onMove && (
+          <ReorderHandle kind="task" id={task.id} label={task.title} onMove={onMove} />
         )}
-      </button>
+      </div>
       {showSubTasks && task.subTasks.length > 0 && (
         <div className="sidebar-subtask-list" aria-label={`${task.title}의 세부 할 일`}>
           {task.subTasks.map((subTask) => (
@@ -396,6 +794,10 @@ function DailyNotesSection({
   onUpdate,
   onToggle,
   onDelete,
+  onMove,
+  onDropNote,
+  reorderable = true,
+  showHeaderAdd = false,
 }: {
   selectedDate: string
   notes: DailyNote[]
@@ -406,13 +808,17 @@ function DailyNotesSection({
   onUpdate: (id: string, content: string) => boolean
   onToggle: (id: string) => void
   onDelete: (id: string) => void
+  onMove?: (id: string, direction: ReorderDirection) => void
+  onDropNote?: (draggedId: string, targetId: string) => void
+  reorderable?: boolean
+  showHeaderAdd?: boolean
 }) {
   const [content, setContent] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const editorRef = useRef<HTMLTextAreaElement>(null)
 
   const sortedNotes = useMemo(
-    () => [...notes].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    () => sortedPositioned(notes),
     [notes],
   )
 
@@ -462,9 +868,24 @@ function DailyNotesSection({
       <div className="panel-section-heading">
         <div>
           <span className="eyebrow">QUICK NOTE</span>
-          <strong id="daily-notes-title">순간 메모</strong>
+          <strong id="daily-notes-title">퀵 노트</strong>
         </div>
-        <span>{notes.length}</span>
+        <div className="panel-heading-actions">
+          <span>{notes.length}</span>
+          {showHeaderAdd && (
+            <IconButton
+              label="선택한 날짜에 퀵 노트 추가"
+              className="section-add-button"
+              onClick={() => {
+                setContent('')
+                setEditingId(null)
+                onComposerOpenChange(true)
+              }}
+            >
+              <Plus size={14} />
+            </IconButton>
+          )}
+        </div>
       </div>
 
       {composerOpen && (
@@ -484,7 +905,7 @@ function DailyNotesSection({
               }
             }}
             placeholder="형식 없이 바로 적어두세요…"
-            aria-label={editingId ? '순간 메모 수정' : '새 순간 메모'}
+            aria-label={editingId ? '퀵 노트 수정' : '새 퀵 노트'}
             maxLength={4000}
           />
           <div>
@@ -512,6 +933,18 @@ function DailyNotesSection({
               key={note.id}
               data-daily-note-id={note.id}
               className={`daily-note-item ${note.completed ? 'is-completed' : ''}`}
+              onDragOver={(event) => {
+                if (!reorderable || !event.dataTransfer.types.includes('application/x-dayline-daily-note')) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+              }}
+              onDrop={(event) => {
+                if (!reorderable) return
+                const draggedId = event.dataTransfer.getData('application/x-dayline-daily-note')
+                if (!draggedId) return
+                event.preventDefault()
+                onDropNote?.(draggedId, note.id)
+              }}
               onContextMenu={(event) => {
                 event.preventDefault()
                 if ((event.target as HTMLElement).closest('.note-delete')) return
@@ -540,9 +973,12 @@ function DailyNotesSection({
               >
                 {note.content}
               </button>
-              <IconButton label="순간 메모 삭제" className="note-delete" onClick={() => onDelete(note.id)}>
+              <IconButton label="퀵 노트 삭제" className="note-delete" onClick={() => onDelete(note.id)}>
                 <Trash2 size={13} />
               </IconButton>
+              {reorderable && onMove && (
+                <ReorderHandle kind="daily-note" id={note.id} label="퀵 노트" onMove={onMove} />
+              )}
             </article>
           ))
         )}
@@ -553,15 +989,19 @@ function DailyNotesSection({
 
 function TaskModal({
   open,
-  initialDate,
+  initialStartDate,
+  initialEndDate,
   task,
+  tags,
   onClose,
   onSave,
   onDelete,
 }: {
   open: boolean
-  initialDate: string
+  initialStartDate: string
+  initialEndDate: string
   task: Task | null
+  tags: TaskTag[]
   onClose: () => void
   onSave: (
     draft: TaskDraft,
@@ -572,15 +1012,18 @@ function TaskModal({
 }) {
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
-  const [dueDate, setDueDate] = useState(initialDate)
+  const [startDate, setStartDate] = useState(initialStartDate)
+  const [dueDate, setDueDate] = useState(initialEndDate)
   const [timeEnabled, setTimeEnabled] = useState(false)
   const [dueTime, setDueTime] = useState('09:00')
   const [color, setColor] = useState<TaskColor>('coral')
+  const [tagId, setTagId] = useState<string | null>(null)
   const [completed, setCompleted] = useState(false)
   const [parentStateTouched, setParentStateTouched] = useState(false)
   const [subTasks, setSubTasks] = useState<SubTask[]>([])
   const [newSubTaskTitle, setNewSubTaskTitle] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const defaultTagId = tags[0]?.id ?? null
   const titleInputRef = useRef<HTMLInputElement>(null)
   const backdropRef = useRef<HTMLDivElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
@@ -606,10 +1049,12 @@ function TaskModal({
     if (!open) return
     setTitle(task?.title ?? '')
     setNote(task?.note ?? '')
-    setDueDate(task?.dueDate ?? initialDate)
+    setStartDate(task?.startDate ?? initialStartDate)
+    setDueDate(task?.dueDate ?? initialEndDate)
     setTimeEnabled(Boolean(task?.dueTime))
     setDueTime(task?.dueTime ?? '09:00')
     setColor(task?.color ?? 'coral')
+    setTagId(task?.tagId ?? defaultTagId)
     setCompleted(task?.completed ?? false)
     setParentStateTouched(false)
     setSubTasks(task?.subTasks ?? [])
@@ -617,7 +1062,7 @@ function TaskModal({
     setConfirmDelete(false)
     const timer = window.setTimeout(() => titleInputRef.current?.focus(), 90)
     return () => window.clearTimeout(timer)
-  }, [open, task, initialDate])
+  }, [open, task, initialStartDate, initialEndDate, defaultTagId])
 
   useEffect(() => {
     if (!open) return
@@ -636,13 +1081,15 @@ function TaskModal({
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (!title.trim() || !dueDate || subTasks.some((subTask) => !subTask.title.trim())) return
+    if (!title.trim() || !startDate || !dueDate || dueDate < startDate || subTasks.some((subTask) => !subTask.title.trim())) return
     const draft: TaskDraft = {
       title: title.trim(),
       note: note.trim(),
+      startDate,
       dueDate,
       dueTime: timeEnabled ? dueTime : null,
       color,
+      tagId,
       subTasks: subTasks.map((subTask) => ({ ...subTask, title: subTask.title.trim() })),
     }
     const editChanges = task
@@ -719,6 +1166,7 @@ function TaskModal({
     <div ref={backdropRef} className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         className="task-modal"
+        data-qa="task-modal"
         role="dialog"
         aria-modal="true"
         aria-hidden={confirmDelete || undefined}
@@ -739,47 +1187,7 @@ function TaskModal({
         </header>
 
         <form onSubmit={submit}>
-          {task && (
-            <section className="task-state-card" aria-label="일정 상태 관리">
-              <div className="task-state-heading">
-                <div>
-                  <span>일정 상태</span>
-                  <small>변경 저장을 눌러야 반영돼요.</small>
-                </div>
-                <strong className={completed ? 'is-inactive' : 'is-active'}>
-                  {completed ? '비활성' : '활성'}
-                </strong>
-              </div>
-              <div className="task-state-controls" role="group" aria-label="활성 상태 선택">
-                <button
-                  type="button"
-                  className={!completed ? 'is-selected' : ''}
-                  aria-pressed={!completed}
-                  onClick={() => setParentState(false)}
-                >
-                  <RotateCcw size={14} /> 활성
-                </button>
-                <button
-                  type="button"
-                  className={completed ? 'is-selected' : ''}
-                  aria-pressed={completed}
-                  onClick={() => setParentState(true)}
-                >
-                  <Check size={14} /> 비활성
-                </button>
-                <button
-                  type="button"
-                  className="task-remove-button"
-                  ref={deleteTriggerRef}
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  <Trash2 size={14} /> 제거
-                </button>
-              </div>
-            </section>
-          )}
-
-          <label className="field-group">
+          <label className="field-group task-title-field">
             <span className="field-label">할 일</span>
             <input
               ref={titleInputRef}
@@ -789,77 +1197,6 @@ function TaskModal({
               placeholder="무엇을 해야 하나요?"
               maxLength={240}
               required
-            />
-          </label>
-
-          <div className="date-priority-card">
-            <div className="field-group date-field">
-              <span className="field-label">
-                <CalendarDays size={15} /> 마감 날짜
-                <span className="required-pill">필수</span>
-              </span>
-              <input
-                type="date"
-                value={dueDate}
-                onInput={(event) => setDueDate(event.currentTarget.value)}
-                required
-                aria-label="마감 날짜"
-              />
-              <div className="quick-date-row">
-                {quickDates.map((quick) => (
-                  <button
-                    type="button"
-                    key={quick.label}
-                    className={dueDate === quick.value ? 'is-selected' : ''}
-                    onClick={() => setDueDate(quick.value)}
-                  >
-                    {quick.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className={`optional-time ${timeEnabled ? 'is-open' : ''}`}>
-              <button
-                type="button"
-                className="time-toggle"
-                role="switch"
-                aria-checked={timeEnabled}
-                onClick={() => {
-                  setTimeEnabled((current) => !current)
-                  if (timeEnabled) setDueTime('09:00')
-                }}
-              >
-                <span className="switch-track"><span /></span>
-                <span>
-                  <strong>시간도 지정</strong>
-                  <small>필요할 때만 추가하세요</small>
-                </span>
-                <Clock3 size={17} />
-              </button>
-              {timeEnabled && (
-                <label className="time-input-wrap">
-                  <span>마감 시간</span>
-                  <input
-                    type="time"
-                    value={dueTime}
-                    onInput={(event) => setDueTime(event.currentTarget.value)}
-                    aria-label="마감 시간"
-                  />
-                </label>
-              )}
-            </div>
-          </div>
-
-          <label className="field-group">
-            <span className="field-label">메모 <span className="optional-label">선택</span></span>
-            <textarea
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              placeholder="필요한 맥락이나 준비물을 적어두세요."
-              aria-label="일정 메모"
-              rows={3}
-              maxLength={2000}
             />
           </label>
 
@@ -911,7 +1248,7 @@ function TaskModal({
                         setParentStateTouched(false)
                         setSubTasks((current) => {
                           const next = current.filter((item) => item.id !== subTask.id)
-                          setCompleted(next.length > 0 && next.every((item) => item.completed))
+                          if (next.length > 0) setCompleted(next.every((item) => item.completed))
                           return next
                         })
                       }}
@@ -943,20 +1280,132 @@ function TaskModal({
             </div>
           </section>
 
-          <fieldset className="color-field">
-            <legend>일정 색상</legend>
-            <div className="color-options">
-              {COLOR_OPTIONS.map((option) => (
+          <section className="date-range-card" data-qa="date-range-fields" aria-labelledby="date-range-title">
+            <div className="date-range-heading">
+              <span className="field-label" id="date-range-title">
+                <CalendarRange size={15} /> 일정 기간 <span className="required-pill">필수</span>
+              </span>
+              <small>{inclusiveDateKeys(startDate, dueDate).length}일</small>
+            </div>
+            <div className="date-range-inputs">
+              <label>
+                <span>시작일</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  onInput={(event) => {
+                    const next = event.currentTarget.value
+                    setStartDate(next)
+                    if (dueDate < next) setDueDate(next)
+                  }}
+                  aria-label="시작 날짜"
+                  required
+                />
+              </label>
+              <span aria-hidden="true">→</span>
+              <label>
+                <span>마감일</span>
+                <input
+                  type="date"
+                  value={dueDate}
+                  min={startDate}
+                  onInput={(event) => setDueDate(event.currentTarget.value < startDate ? startDate : event.currentTarget.value)}
+                  aria-label="마감 날짜"
+                  required
+                />
+              </label>
+            </div>
+            <div className="quick-date-row">
+              {quickDates.map((quick) => (
                 <button
-                  key={option.value}
                   type="button"
-                  className={`color-option color-${option.value} ${color === option.value ? 'is-selected' : ''}`}
-                  onClick={() => setColor(option.value)}
-                  aria-label={`${option.label} 색상`}
-                  aria-pressed={color === option.value}
+                  key={quick.label}
+                  className={startDate === quick.value && dueDate === quick.value ? 'is-selected' : ''}
+                  onClick={() => {
+                    setStartDate(quick.value)
+                    setDueDate(quick.value)
+                  }}
                 >
-                  <span>{color === option.value && <Check size={13} strokeWidth={3} />}</span>
-                  {option.label}
+                  {quick.label}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {task && (
+            <section className="task-state-card" aria-label="일정 상태 관리">
+              <div className="task-state-heading">
+                <div><span>일정 상태</span><small>변경 저장을 눌러야 반영돼요.</small></div>
+                <strong className={completed ? 'is-inactive' : 'is-active'}>{completed ? '비활성' : '활성'}</strong>
+              </div>
+              <div className="task-state-controls" role="group" aria-label="활성 상태 선택">
+                <button type="button" className={!completed ? 'is-selected' : ''} aria-pressed={!completed} onClick={() => setParentState(false)}>
+                  <RotateCcw size={14} /> 활성
+                </button>
+                <button type="button" className={completed ? 'is-selected' : ''} aria-pressed={completed} onClick={() => setParentState(true)}>
+                  <Check size={14} /> 비활성
+                </button>
+                <button type="button" className="task-remove-button" ref={deleteTriggerRef} onClick={() => setConfirmDelete(true)}>
+                  <Trash2 size={14} /> 제거
+                </button>
+              </div>
+            </section>
+          )}
+
+          <div className={`optional-time modal-time-card ${timeEnabled ? 'is-open' : ''}`}>
+            <button
+              type="button"
+              className="time-toggle"
+              role="switch"
+              aria-checked={timeEnabled}
+              onClick={() => {
+                setTimeEnabled((current) => !current)
+                if (timeEnabled) setDueTime('09:00')
+              }}
+            >
+              <span className="switch-track"><span /></span>
+              <span><strong>마감 시간도 지정</strong><small>필요할 때만 추가하세요</small></span>
+              <Clock3 size={17} />
+            </button>
+            {timeEnabled && (
+              <label className="time-input-wrap">
+                <span>마감 시간</span>
+                <input type="time" value={dueTime} onInput={(event) => setDueTime(event.currentTarget.value)} aria-label="마감 시간" />
+              </label>
+            )}
+          </div>
+
+          <label className="field-group task-note-field">
+            <span className="field-label">메모 <span className="optional-label">선택</span></span>
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="필요한 맥락이나 준비물을 적어두세요."
+              aria-label="일정 메모"
+              rows={3}
+              maxLength={2000}
+            />
+          </label>
+
+          <fieldset className="tag-picker" data-qa="task-tag-picker">
+            <legend>일정 태그</legend>
+            <div className="tag-picker-options" role="radiogroup" aria-label="일정 태그">
+              <button type="button" className={tagId === null ? 'is-selected' : ''} onClick={() => setTagId(null)} aria-pressed={tagId === null}>
+                <span className="tag-swatch is-neutral" /> 없음
+              </button>
+              {sortedPositioned(tags).map((tag) => (
+                <button
+                  type="button"
+                  key={tag.id}
+                  data-tag-id={tag.id}
+                  className={tagId === tag.id ? 'is-selected' : ''}
+                  onClick={() => {
+                    setTagId(tag.id)
+                    if (tag.legacyColor) setColor(tag.legacyColor)
+                  }}
+                  aria-pressed={tagId === tag.id}
+                >
+                  <span className="tag-swatch" style={{ background: tag.color }} /> {tag.name}
                 </button>
               ))}
             </div>
@@ -969,7 +1418,7 @@ function TaskModal({
               <button
                 type="submit"
                 className="primary-button"
-                disabled={!title.trim() || !dueDate || subTasks.some((subTask) => !subTask.title.trim())}
+                disabled={!title.trim() || !startDate || !dueDate || dueDate < startDate || subTasks.some((subTask) => !subTask.title.trim())}
               >
                 {task ? '변경 저장' : '일정 추가'}
               </button>
@@ -1044,24 +1493,68 @@ function RecoveryPanel({
   onClose: () => void
   onRestore: (id: string) => void
 }) {
+  const layerRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+
   useEffect(() => {
-    if (!open) return
+    if (!open || !layerRef.current || !panelRef.current) return
+    returnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    const releaseInert = makeOutsideInert(layerRef.current)
+    const focusInitialControl = () => {
+      const initialFocus = panelRef.current?.querySelector<HTMLElement>('header .icon-button')
+      if (initialFocus) initialFocus.focus({ preventScroll: true })
+      else panelRef.current?.focus({ preventScroll: true })
+    }
+    focusInitialControl()
+    const focusFrame = window.requestAnimationFrame(focusInitialControl)
+    const focusTimer = window.setTimeout(focusInitialControl, 80)
     const handleKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
+    return () => {
+      window.removeEventListener('keydown', handleKey)
+      window.cancelAnimationFrame(focusFrame)
+      window.clearTimeout(focusTimer)
+      releaseInert()
+      const previousFocus = returnFocusRef.current
+      window.setTimeout(() => {
+        if (previousFocus?.isConnected) previousFocus.focus()
+      })
+    }
   }, [open, onClose])
 
+  if (!open) return null
+
   return (
-    <div className={`recovery-layer ${open ? 'is-open' : ''}`} aria-hidden={!open}>
-      <button type="button" className="recovery-scrim" aria-label="최근 삭제 닫기" onClick={onClose} />
-      <aside className="recovery-panel" aria-label="최근 삭제">
+    <div
+      ref={layerRef}
+      className="recovery-layer is-open"
+    >
+      <div
+        className="recovery-scrim"
+        aria-hidden="true"
+        onClick={onClose}
+      />
+      <aside
+        ref={panelRef}
+        id="recovery-panel"
+        className="recovery-panel"
+        data-qa="recovery-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recovery-title"
+        tabIndex={-1}
+        onKeyDown={trapDialogFocus}
+      >
         <header>
           <div className="recovery-icon"><ArchiveRestore size={21} /></div>
           <div>
             <span className="eyebrow">RECOVERY</span>
-            <h2>최근 삭제</h2>
+            <h2 id="recovery-title">최근 삭제</h2>
           </div>
           <IconButton label="닫기" onClick={onClose}><X size={18} /></IconButton>
         </header>
@@ -1087,7 +1580,18 @@ function RecoveryPanel({
                     {task.completed ? '비활성 상태' : '활성 상태'} · {remainingRetentionDays(task)}일 남음
                   </span>
                 </div>
-                <button type="button" className="restore-button" onClick={() => onRestore(task.id)}>
+                <button
+                  type="button"
+                  className="restore-button"
+                  onClick={() => {
+                    onRestore(task.id)
+                    window.setTimeout(() => {
+                      const nextFocus = panelRef.current?.querySelector<HTMLElement>('.restore-button')
+                        ?? panelRef.current?.querySelector<HTMLElement>('header .icon-button')
+                      nextFocus?.focus()
+                    })
+                  }}
+                >
                   <RotateCcw size={14} /> 복구
                 </button>
               </article>
@@ -1126,9 +1630,350 @@ function Toast({ toast, onClose }: { toast: ToastMessage | null; onClose: () => 
   )
 }
 
+function FilterPanel({
+  tags,
+  selected,
+  onToggle,
+  onClear,
+  onClose,
+}: {
+  tags: TaskTag[]
+  selected: Set<string>
+  onToggle: (id: string) => void
+  onClear: () => void
+  onClose: () => void
+}) {
+  return (
+    <aside id="rail-panel-filters" className="rail-flyout" data-qa="filter-panel" aria-labelledby="rail-action-filters">
+      <header className="flyout-header">
+        <div><span className="eyebrow">FILTER</span><h2>태그 필터</h2></div>
+        <IconButton label="태그 필터 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
+      </header>
+      <p className="flyout-intro">선택한 태그 중 하나라도 포함된 일정만 표시해요.</p>
+      <div className="filter-tag-list" role="group" aria-label="표시할 태그 복수 선택">
+        {sortedPositioned(tags).map((tag) => (
+          <button
+            type="button"
+            key={tag.id}
+            data-tag-id={tag.id}
+            className={selected.has(tag.id) ? 'is-selected' : ''}
+            role="checkbox"
+            aria-checked={selected.has(tag.id)}
+            onClick={() => onToggle(tag.id)}
+          >
+            <span className="tag-swatch" style={{ background: tag.color }} />
+            <span>{tag.name}</span>
+            {selected.has(tag.id) && <Check size={14} />}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={selected.has(UNTAGGED_FILTER) ? 'is-selected' : ''}
+          role="checkbox"
+          aria-checked={selected.has(UNTAGGED_FILTER)}
+          onClick={() => onToggle(UNTAGGED_FILTER)}
+        >
+          <span className="tag-swatch is-neutral" /><span>태그 없음</span>
+          {selected.has(UNTAGGED_FILTER) && <Check size={14} />}
+        </button>
+      </div>
+      <button type="button" className="flyout-clear" onClick={onClear} disabled={selected.size === 0}>
+        필터 초기화
+      </button>
+    </aside>
+  )
+}
+
+function TagManagerRow({
+  tag,
+  onUpdate,
+  onDelete,
+}: {
+  tag: TaskTag
+  onUpdate: (id: string, changes: Partial<Pick<TaskTag, 'name' | 'color'>>) => boolean
+  onDelete: (id: string) => void
+}) {
+  const [name, setName] = useState(tag.name)
+  useEffect(() => setName(tag.name), [tag.name])
+  return (
+    <article className="tag-manager-row" data-tag-id={tag.id}>
+      <div className="tag-color-controls" role="group" aria-label={`${tag.name} 색상 선택`}>
+        {TAG_PALETTE.map((color) => (
+          <button
+            type="button"
+            key={color}
+            className={normalizedHex(tag.color) === color ? 'is-selected' : ''}
+            style={{ background: color }}
+            aria-label={`${tag.name} 색상 ${color.toUpperCase()}`}
+            onClick={() => onUpdate(tag.id, { color })}
+          />
+        ))}
+        <input
+          type="color"
+          value={normalizedHex(tag.color)}
+          aria-label={`${tag.name} 사용자 지정 색상`}
+          onChange={(event) => onUpdate(tag.id, { color: event.target.value })}
+        />
+      </div>
+      <input
+        value={name}
+        aria-label={`${tag.name} 이름`}
+        maxLength={40}
+        onChange={(event) => setName(event.target.value)}
+        onBlur={() => {
+          const next = name.trim()
+          if (!next) setName(tag.name)
+          else if (next !== tag.name && !onUpdate(tag.id, { name: next })) setName(tag.name)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur()
+          if (event.key === 'Escape') {
+            setName(tag.name)
+            event.currentTarget.blur()
+          }
+        }}
+      />
+      <span>{tag.builtIn ? '기본' : '사용자'}</span>
+      {!tag.builtIn && (
+        <IconButton label={`${tag.name} 태그 삭제`} onClick={() => onDelete(tag.id)}><Trash2 size={14} /></IconButton>
+      )}
+    </article>
+  )
+}
+
+function AppearancePanel({
+  settings,
+  onSettingsChange,
+  onClose,
+}: {
+  settings: AppSettings
+  onSettingsChange: (changes: Partial<AppSettings>) => boolean
+  onClose: () => void
+}) {
+  return (
+    <aside id="rail-panel-appearance" className="rail-flyout" data-qa="appearance-panel" aria-labelledby="rail-action-appearance">
+      <header className="flyout-header">
+        <div><span className="eyebrow">APPEARANCE</span><h2>화면 설정</h2></div>
+        <IconButton label="화면 설정 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
+      </header>
+      <div className="settings-scroll">
+        <section className="settings-card">
+          <div className="settings-heading"><span>글자·화면 배율</span><strong>{Math.round(settings.fontScale * 100)}%</strong></div>
+          <input
+            type="range"
+            data-qa="font-scale"
+            min="0.85"
+            max="1.3"
+            step="0.05"
+            value={settings.fontScale}
+            aria-label="글자 및 화면 배율"
+            onChange={(event) => onSettingsChange({ fontScale: Number(event.target.value) })}
+          />
+        </section>
+        <section className="settings-card">
+          <div className="settings-heading"><span>테마 색상</span><span className="tag-swatch" style={{ background: settings.themeColor }} /></div>
+          <div className="theme-palette" aria-label="테마 색상 팔레트">
+            {TAG_PALETTE.map((color) => (
+              <button
+                type="button"
+                key={color}
+                style={{ background: color }}
+                className={normalizedHex(settings.themeColor) === color ? 'is-selected' : ''}
+                aria-label={`테마 색상 ${color.toUpperCase()}`}
+                onClick={() => onSettingsChange({ themeColor: color })}
+              />
+            ))}
+            <input
+              type="color"
+              data-qa="theme-color"
+              value={normalizedHex(settings.themeColor)}
+              aria-label="사용자 지정 테마 색상"
+              onChange={(event) => onSettingsChange({ themeColor: event.target.value })}
+            />
+          </div>
+        </section>
+      </div>
+    </aside>
+  )
+}
+
+function TagSettingsPanel({
+  tags,
+  onTagCreate,
+  onTagUpdate,
+  onTagDelete,
+  onClose,
+}: {
+  tags: TaskTag[]
+  onTagCreate: (name: string, color: string) => boolean
+  onTagUpdate: (id: string, changes: Partial<Pick<TaskTag, 'name' | 'color'>>) => boolean
+  onTagDelete: (id: string) => void
+  onClose: () => void
+}) {
+  const [newTagName, setNewTagName] = useState('')
+  const [newTagColor, setNewTagColor] = useState(TAG_PALETTE[5])
+  return (
+    <aside id="rail-panel-tags" className="rail-flyout is-wide" data-qa="tag-settings-panel" aria-labelledby="rail-action-tags">
+      <header className="flyout-header">
+        <div><span className="eyebrow">TAGS</span><h2>태그 설정</h2></div>
+        <IconButton label="태그 설정 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
+      </header>
+      <p className="flyout-intro">일정에 사용할 태그의 이름과 색상을 관리해요.</p>
+      <div className="settings-scroll">
+        <section className="settings-card tag-manager">
+          <div className="settings-heading"><span>태그 관리</span><strong>{tags.length}</strong></div>
+          <div className="tag-manager-list">
+            {sortedPositioned(tags).map((tag) => (
+              <TagManagerRow key={tag.id} tag={tag} onUpdate={onTagUpdate} onDelete={onTagDelete} />
+            ))}
+          </div>
+          <div className="tag-create-row">
+            <div className="tag-color-controls" role="group" aria-label="새 태그 색상 선택">
+              {TAG_PALETTE.map((color) => (
+                <button
+                  type="button"
+                  key={color}
+                  className={newTagColor === color ? 'is-selected' : ''}
+                  style={{ background: color }}
+                  aria-label={`새 태그 색상 ${color.toUpperCase()}`}
+                  onClick={() => setNewTagColor(color)}
+                />
+              ))}
+              <input type="color" value={newTagColor} aria-label="새 태그 사용자 지정 색상" onChange={(event) => setNewTagColor(event.target.value)} />
+            </div>
+            <input data-qa="new-tag-name" value={newTagName} aria-label="새 태그 이름" placeholder="새 태그 이름" maxLength={40} onChange={(event) => setNewTagName(event.target.value)} />
+            <button
+              type="button"
+              disabled={!newTagName.trim()}
+              onClick={() => {
+                if (onTagCreate(newTagName.trim(), newTagColor)) setNewTagName('')
+              }}
+            >
+              <Plus size={14} /> 추가
+            </button>
+          </div>
+        </section>
+      </div>
+    </aside>
+  )
+}
+
+function TemplatePanel({
+  templates,
+  tags,
+  selectedDate,
+  onSave,
+  onDelete,
+  onInstantiate,
+  onClose,
+}: {
+  templates: TaskTemplate[]
+  tags: TaskTag[]
+  selectedDate: string
+  onSave: (draft: TemplateDraft, id?: string, openingSnapshot?: TaskTemplate) => boolean
+  onDelete: (id: string) => boolean
+  onInstantiate: (id: string, startDate: string) => boolean
+  onClose: () => void
+}) {
+  const emptyDraft = (): TemplateDraft => ({
+    title: '', note: '', dueTime: null, tagId: tags[0]?.id ?? null,
+    legacyColor: tags[0]?.legacyColor ?? 'coral', durationDays: 1, subTaskTitles: [],
+  })
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingSnapshot, setEditingSnapshot] = useState<TaskTemplate | null>(null)
+  const [draft, setDraft] = useState<TemplateDraft>(() => emptyDraft())
+  const [subTaskText, setSubTaskText] = useState('')
+  const reset = () => {
+    setEditingId(null)
+    setEditingSnapshot(null)
+    setDraft(emptyDraft())
+    setSubTaskText('')
+  }
+  return (
+    <aside id="rail-panel-templates" className="rail-flyout is-wide" data-qa="template-panel" aria-labelledby="rail-action-templates">
+      <header className="flyout-header">
+        <div><span className="eyebrow">TEMPLATES</span><h2>반복 일정</h2></div>
+        <IconButton label="반복 일정 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
+      </header>
+      <p className="flyout-intro">카드를 날짜 칸에 놓거나 선택한 날짜에 바로 추가하세요.</p>
+      <div className="template-scroll">
+        <div className="template-card-list">
+          {sortedPositioned(templates).map((template) => {
+            const tag = tags.find((item) => item.id === template.tagId)
+            const rawColor = normalizedHex(tag?.color ?? LEGACY_COLORS[template.legacyColor])
+            return (
+              <article
+                key={template.id}
+                className="template-card"
+                data-template-id={template.id}
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = 'copy'
+                  event.dataTransfer.setData('application/x-dayline-template', template.id)
+                }}
+                style={{ '--task-color': accessibleAccent(rawColor), '--task-raw': rawColor } as CSSProperties}
+              >
+                <GripVertical size={15} aria-hidden="true" />
+                <div><strong>{template.title}</strong><span>{template.durationDays}일{tag ? ` · ${tag.name}` : ''}{template.dueTime ? ` · ${template.dueTime}` : ''}</span></div>
+                <button type="button" onClick={() => onInstantiate(template.id, selectedDate)}>선택 날짜에 추가</button>
+                <IconButton
+                  label={`${template.title} 수정`}
+                  onClick={() => {
+                    setEditingId(template.id)
+                    setEditingSnapshot(template)
+                    setDraft({
+                      title: template.title, note: template.note, dueTime: template.dueTime,
+                      tagId: template.tagId, legacyColor: template.legacyColor,
+                      durationDays: template.durationDays, subTaskTitles: template.subTaskTitles,
+                    })
+                    setSubTaskText(template.subTaskTitles.join('\n'))
+                  }}
+                ><Settings2 size={13} /></IconButton>
+                <IconButton label={`${template.title} 삭제`} onClick={() => {
+                  if (onDelete(template.id) && editingId === template.id) reset()
+                }}><Trash2 size={13} /></IconButton>
+              </article>
+            )
+          })}
+        </div>
+        <form className="template-form" data-qa="template-form" onSubmit={(event) => {
+          event.preventDefault()
+          if (!draft.title.trim()) return
+          const subTaskTitles = subTaskText
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+          if (onSave(
+            { ...draft, title: draft.title.trim(), note: draft.note.trim(), subTaskTitles },
+            editingId ?? undefined,
+            editingSnapshot ?? undefined,
+          )) reset()
+        }}>
+          <div className="settings-heading"><span>{editingId ? '템플릿 수정' : '새 템플릿'}</span>{editingId && <button type="button" onClick={reset}>새로 만들기</button>}</div>
+          <input value={draft.title} aria-label="템플릿 제목" placeholder="제목" maxLength={240} required onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} />
+          <label><span>세부 할 일 <small>한 줄에 하나</small></span><textarea value={subTaskText} aria-label="템플릿 세부 할 일" rows={3} onChange={(event) => setSubTaskText(event.target.value)} /></label>
+          <div className="template-form-grid">
+            <label><span>기간</span><input type="number" min="1" max="365" value={draft.durationDays} aria-label="템플릿 기간 일수" onChange={(event) => setDraft((current) => ({ ...current, durationDays: clamp(Number(event.target.value) || 1, 1, 365) }))} /></label>
+            <label><span>시간</span><input type="time" value={draft.dueTime ?? ''} aria-label="템플릿 마감 시간" onChange={(event) => setDraft((current) => ({ ...current, dueTime: event.target.value || null }))} /></label>
+          </div>
+          <label><span>태그</span><select value={draft.tagId ?? ''} aria-label="템플릿 태그" onChange={(event) => {
+            const tag = tags.find((item) => item.id === event.target.value)
+            setDraft((current) => ({ ...current, tagId: event.target.value || null, legacyColor: tag?.legacyColor ?? current.legacyColor }))
+          }}><option value="">없음</option>{sortedPositioned(tags).map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}</select></label>
+          <textarea value={draft.note} aria-label="템플릿 메모" placeholder="메모" rows={2} onChange={(event) => setDraft((current) => ({ ...current, note: event.target.value }))} />
+          <button type="submit" className="primary-button" disabled={!draft.title.trim()}><Save size={14} /> {editingId ? '변경 저장' : '템플릿 추가'}</button>
+        </form>
+      </div>
+    </aside>
+  )
+}
+
 interface SharedViewProps {
   tasks: Task[]
   dailyNotes: DailyNote[]
+  taskTags: TaskTag[]
+  settings: AppSettings
+  taskTemplates: TaskTemplate[]
   loading: boolean
   error: string | null
   migrationWarning: LegacyMigrationWarning | null
@@ -1140,6 +1985,15 @@ interface SharedViewProps {
   onDailyNoteUpdate: (id: string, content: string) => boolean
   onDailyNoteToggle: (id: string) => void
   onDailyNoteDelete: (id: string) => void
+  onTaskReorder: (orderedIds: string[]) => boolean
+  onDailyNoteReorder: (orderedIds: string[]) => boolean
+  onSettingsChange: (changes: Partial<AppSettings>) => boolean
+  onTagCreate: (name: string, color: string) => boolean
+  onTagUpdate: (id: string, changes: Partial<Pick<TaskTag, 'name' | 'color'>>) => boolean
+  onTagDelete: (id: string) => void
+  onTemplateSave: (draft: TemplateDraft, id?: string, openingSnapshot?: TaskTemplate) => boolean
+  onTemplateDelete: (id: string) => boolean
+  onTemplateInstantiate: (id: string, startDate: string) => boolean
   onCreate: (draft: TaskDraft) => boolean
   onUpdate: (id: string, changes: TaskEditChanges) => boolean
 }
@@ -1148,6 +2002,9 @@ function MainView(props: SharedViewProps) {
   const {
     tasks,
     dailyNotes,
+    taskTags,
+    settings,
+    taskTemplates,
     loading,
     error,
     migrationWarning,
@@ -1159,6 +2016,15 @@ function MainView(props: SharedViewProps) {
     onDailyNoteUpdate,
     onDailyNoteToggle,
     onDailyNoteDelete,
+    onTaskReorder,
+    onDailyNoteReorder,
+    onSettingsChange,
+    onTagCreate,
+    onTagUpdate,
+    onTagDelete,
+    onTemplateSave,
+    onTemplateDelete,
+    onTemplateInstantiate,
     onCreate,
     onUpdate,
   } = props
@@ -1172,49 +2038,136 @@ function MainView(props: SharedViewProps) {
   const [searchOpen, setSearchOpen] = useState(false)
   const [noteComposerOpen, setNoteComposerOpen] = useState(false)
   const [noteCreateRequest, setNoteCreateRequest] = useState(0)
+  const [railPanel, setRailPanel] = useState<RailPanel>(null)
+  const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(() => new Set())
+  const [selectedRange, setSelectedRange] = useState(() => ({ startDate: today, endDate: today }))
+  const [sidebarSplit, setSidebarSplit] = useState(settings.sidebarSplit)
+  const [calendarMaxLanes, setCalendarMaxLanes] = useState(3)
+  const rangeAnchorRef = useRef<string | null>(null)
+  const rangeMovedRef = useRef(false)
+  const calendarGridRef = useRef<HTMLDivElement | null>(null)
+
+  const closeRailPanel = useCallback(() => {
+    const panel = railPanel
+    setRailPanel(null)
+    if (!panel) return
+    window.setTimeout(() => document.getElementById(`rail-action-${panel}`)?.focus())
+  }, [railPanel])
+  const closeRecovery = useCallback(() => setRecoveryOpen(false), [])
+
+  useEffect(() => setSidebarSplit(settings.sidebarSplit), [settings.sidebarSplit])
+
+  useEffect(() => {
+    if (loading) return
+    const grid = calendarGridRef.current
+    if (!grid) return
+    const updateLaneCapacity = () => {
+      const rowHeight = (grid.getBoundingClientRect().height - 5) / 6
+      const capacity = clamp(Math.floor((rowHeight - 30) / 23), 1, 3)
+      setCalendarMaxLanes((current) => current === capacity ? current : capacity)
+    }
+    const observer = new ResizeObserver(updateLaneCapacity)
+    observer.observe(grid)
+    updateLaneCapacity()
+    return () => observer.disconnect()
+  }, [loading])
+
+  useEffect(() => {
+    if (!railPanel) return
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') closeRailPanel()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [closeRailPanel, railPanel])
+
+  useEffect(() => {
+    const validIds = new Set(taskTags.map((tag) => tag.id))
+    setSelectedTagIds((current) => {
+      const next = new Set([...current].filter((id) => id === UNTAGGED_FILTER || validIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [taskTags])
+
+  useEffect(() => {
+    const finishRange = () => { rangeAnchorRef.current = null }
+    window.addEventListener('pointerup', finishRange)
+    window.addEventListener('pointercancel', finishRange)
+    window.addEventListener('blur', finishRange)
+    return () => {
+      window.removeEventListener('pointerup', finishRange)
+      window.removeEventListener('pointercancel', finishRange)
+      window.removeEventListener('blur', finishRange)
+    }
+  }, [])
 
   const active = useMemo(() => visibleTasks(tasks), [tasks])
   const deleted = useMemo(() => deletedTasks(tasks), [tasks])
   const normalizedSearch = search.trim().toLocaleLowerCase('ko-KR')
-  const filtered = useMemo(
-    () =>
-      normalizedSearch
-        ? active.filter((task) => `${task.title} ${task.note}`.toLocaleLowerCase('ko-KR').includes(normalizedSearch))
-        : active,
-    [active, normalizedSearch],
-  )
+  const filtered = useMemo(() => active.filter((task) => {
+    const searchMatches = !normalizedSearch
+      || `${task.title} ${task.note}`.toLocaleLowerCase('ko-KR').includes(normalizedSearch)
+    const tagMatches = selectedTagIds.size === 0
+      || (task.tagId ? selectedTagIds.has(task.tagId) : selectedTagIds.has(UNTAGGED_FILTER))
+    return searchMatches && tagMatches
+  }), [active, normalizedSearch, selectedTagIds])
   const days = useMemo(() => calendarDays(month), [month])
+  const calendarTasks = useMemo(() => {
+    const firstDay = days[0]?.key
+    const lastDay = days.at(-1)?.key
+    if (!firstDay || !lastDay) return []
+    return sortTasks(filtered.filter((task) => taskOverlapsRange(task, firstDay, lastDay)))
+  }, [days, filtered])
+  const calendarTaskLayout = useMemo(
+    () => layoutCalendarTaskSegments(
+      calendarTasks,
+      days[0]?.key ?? today,
+      days.length,
+      calendarMaxLanes,
+    ),
+    [calendarMaxLanes, calendarTasks, days, today],
+  )
+  const calendarTaskById = useMemo(
+    () => new Map(calendarTasks.map((task) => [task.id, task])),
+    [calendarTasks],
+  )
   const selectedTasks = useMemo(
-    () => sortTasks(filtered.filter((task) => task.dueDate === selectedDate)),
+    () => sortTasks(filtered.filter((task) => taskOccursOnDate(task, selectedDate))),
     [filtered, selectedDate],
   )
   const selectedDailyNotes = useMemo(
-    () => dailyNotes.filter((note) => note.noteDate === selectedDate),
+    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
     [dailyNotes, selectedDate],
   )
   const monthTasks = useMemo(
-    () => active.filter((task) => {
-      const date = fromDateKey(task.dueDate)
-      return date.getFullYear() === month.getFullYear() && date.getMonth() === month.getMonth()
-    }),
-    [active, month],
+    () => filtered.filter((task) => taskOverlapsRange(
+      task,
+      `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}-01`,
+      `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}-${String(new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()).padStart(2, '0')}`,
+    )),
+    [filtered, month],
   )
   const monthCompleted = monthTasks.filter((task) => task.completed).length
 
-  const openCreate = (date = selectedDate) => {
-    setSelectedDate(date)
+  const openCreate = (date?: string) => {
+    if (date && !dateRangeContains(selectedRange.startDate, selectedRange.endDate, date)) {
+      setSelectedRange({ startDate: date, endDate: date })
+      setSelectedDate(date)
+    }
     setEditingTask(null)
     setModalOpen(true)
   }
 
   const openTask = (task: Task) => {
-    setSelectedDate(task.dueDate)
+    setSelectedDate(task.startDate)
+    setSelectedRange({ startDate: task.startDate, endDate: task.dueDate })
     setEditingTask(task)
     setModalOpen(true)
   }
 
   const chooseDate = (key: string) => {
     setSelectedDate(key)
+    setSelectedRange({ startDate: key, endDate: key })
     const date = fromDateKey(key)
     if (date.getMonth() !== month.getMonth() || date.getFullYear() !== month.getFullYear()) {
       setMonth(startOfMonth(date))
@@ -1223,6 +2176,7 @@ function MainView(props: SharedViewProps) {
 
   const goToday = () => {
     setSelectedDate(today)
+    setSelectedRange({ startDate: today, endDate: today })
     setMonth(startOfMonth(new Date()))
   }
 
@@ -1231,7 +2185,9 @@ function MainView(props: SharedViewProps) {
     setMonth(nextMonth)
     const selected = fromDateKey(selectedDate)
     const day = Math.min(selected.getDate(), new Date(year, monthIndex + 1, 0).getDate())
-    setSelectedDate(`${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`)
+    const key = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    setSelectedDate(key)
+    setSelectedRange({ startDate: key, endDate: key })
   }
 
   const navigateMonth = (offset: number) => {
@@ -1245,6 +2201,81 @@ function MainView(props: SharedViewProps) {
       event.preventDefault()
       chooseDate(key)
     }
+  }
+
+  const beginRange = (event: ReactPointerEvent<HTMLDivElement>, key: string) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return
+    event.preventDefault()
+    rangeAnchorRef.current = key
+    rangeMovedRef.current = false
+    setSelectedDate(key)
+    setSelectedRange({ startDate: key, endDate: key })
+  }
+
+  const extendRange = (event: ReactPointerEvent<HTMLDivElement>, key: string) => {
+    const anchor = rangeAnchorRef.current
+    if (!anchor) return
+    if ((event.buttons & 1) === 0) {
+      rangeAnchorRef.current = null
+      return
+    }
+    const next = normalizedRange(anchor, key)
+    rangeMovedRef.current = rangeMovedRef.current || key !== anchor
+    setSelectedDate(next.startDate)
+    setSelectedRange(next)
+  }
+
+  const extendRangeFromGrid = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const anchor = rangeAnchorRef.current
+    if (!anchor) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) return
+    const column = clamp(Math.floor(((event.clientX - bounds.left) / bounds.width) * 7), 0, 6)
+    const row = clamp(Math.floor(((event.clientY - bounds.top) / bounds.height) * 6), 0, 5)
+    const day = days[row * 7 + column]
+    if (!day) return
+    const next = normalizedRange(anchor, day.key)
+    rangeMovedRef.current = rangeMovedRef.current || day.key !== anchor
+    setSelectedDate(next.startDate)
+    setSelectedRange(next)
+  }
+
+  const reorderTasksByDrop = (draggedId: string, targetId: string) => {
+    onTaskReorder(droppedIds(selectedTasks.map((task) => task.id), draggedId, targetId))
+  }
+  const moveTask = (id: string, direction: ReorderDirection) => {
+    onTaskReorder(movedIds(selectedTasks.map((task) => task.id), id, direction))
+  }
+  const reorderCalendarTasksByDrop = (draggedId: string, targetId: string) => {
+    onTaskReorder(droppedIds(calendarTasks.map((task) => task.id), draggedId, targetId))
+  }
+  const moveCalendarTask = (id: string, direction: ReorderDirection) => {
+    onTaskReorder(movedIds(calendarTasks.map((task) => task.id), id, direction))
+  }
+  const dropTemplateAtCalendarPoint = (
+    templateId: string,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const grid = document.querySelector<HTMLElement>('.calendar-grid')
+    if (!grid) return
+    const bounds = grid.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) return
+    const column = clamp(Math.floor(((clientX - bounds.left) / bounds.width) * 7), 0, 6)
+    const row = clamp(Math.floor(((clientY - bounds.top) / bounds.height) * 6), 0, 5)
+    const day = days[row * 7 + column]
+    if (day) onTemplateInstantiate(templateId, day.key)
+  }
+  const reorderNotesByDrop = (draggedId: string, targetId: string) => {
+    onDailyNoteReorder(droppedIds(selectedDailyNotes.map((note) => note.id), draggedId, targetId))
+  }
+  const moveNote = (id: string, direction: ReorderDirection) => {
+    onDailyNoteReorder(movedIds(selectedDailyNotes.map((note) => note.id), id, direction))
+  }
+
+  const toggleRailPanel = (panel: Exclude<RailPanel, null>) => {
+    setRecoveryOpen(false)
+    setRailPanel((current) => current === panel ? null : panel)
   }
 
   if (loading) {
@@ -1261,24 +2292,112 @@ function MainView(props: SharedViewProps) {
       <aside className="side-rail">
         <div className="rail-brand"><BrandMark /></div>
         <nav aria-label="주요 메뉴">
-          <IconButton label="캘린더" active><LayoutGrid size={20} /></IconButton>
           <IconButton
+            id="rail-action-templates"
+            label="반복 일정"
+            controls="rail-panel-templates"
+            expanded={railPanel === 'templates'}
+            railAction="templates"
+            active={railPanel === 'templates'}
+            onClick={() => toggleRailPanel('templates')}
+          >
+            <Repeat2 size={19} />
+          </IconButton>
+          <IconButton
+            id="rail-action-filters"
+            label={`태그 필터${selectedTagIds.size ? ` ${selectedTagIds.size}개 적용 중` : ''}`}
+            controls="rail-panel-filters"
+            expanded={railPanel === 'filters'}
+            railAction="filters"
+            active={railPanel === 'filters' || selectedTagIds.size > 0}
+            onClick={() => toggleRailPanel('filters')}
+          >
+            <Filter size={19} />
+            {selectedTagIds.size > 0 && <span className="nav-badge filter-badge">{selectedTagIds.size}</span>}
+          </IconButton>
+          <IconButton
+            id="rail-action-tags"
+            label="태그 설정"
+            controls="rail-panel-tags"
+            expanded={railPanel === 'tags'}
+            railAction="tags"
+            active={railPanel === 'tags'}
+            onClick={() => toggleRailPanel('tags')}
+          >
+            <Tags size={19} />
+          </IconButton>
+          <IconButton
+            id="rail-action-appearance"
+            label="화면 설정"
+            controls="rail-panel-appearance"
+            expanded={railPanel === 'appearance'}
+            railAction="appearance"
+            active={railPanel === 'appearance'}
+            onClick={() => toggleRailPanel('appearance')}
+          >
+            <Palette size={19} />
+          </IconButton>
+        </nav>
+        <div className="rail-bottom" role="navigation" aria-label="보관 메뉴">
+          <IconButton
+            id="rail-action-recovery"
             label={`최근 삭제 ${deleted.length}개`}
+            controls="recovery-panel"
+            expanded={recoveryOpen}
+            railAction="recovery"
             active={recoveryOpen}
-            onClick={() => setRecoveryOpen(true)}
+            onClick={() => {
+              setRailPanel(null)
+              setRecoveryOpen(true)
+            }}
           >
             <History size={20} />
             {deleted.length > 0 && <span className="nav-badge">{deleted.length}</span>}
           </IconButton>
-        </nav>
-        <div className="rail-bottom">
-          <span
-            className="offline-dot"
-            title={window.dayline ? 'SQLite 오프라인 DB 사용 중' : '브라우저 임시 저장 사용 중'}
-          />
-          <span>{window.dayline ? 'SQLITE' : 'LOCAL'}</span>
         </div>
       </aside>
+
+      {railPanel === 'filters' && (
+        <FilterPanel
+          tags={taskTags}
+          selected={selectedTagIds}
+          onToggle={(id) => setSelectedTagIds((current) => {
+            const next = new Set(current)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+          })}
+          onClear={() => setSelectedTagIds(new Set())}
+          onClose={closeRailPanel}
+        />
+      )}
+      {railPanel === 'templates' && (
+        <TemplatePanel
+          templates={taskTemplates}
+          tags={taskTags}
+          selectedDate={selectedDate}
+          onSave={onTemplateSave}
+          onDelete={onTemplateDelete}
+          onInstantiate={onTemplateInstantiate}
+          onClose={closeRailPanel}
+        />
+      )}
+      {railPanel === 'tags' && (
+        <TagSettingsPanel
+          tags={taskTags}
+          onTagCreate={onTagCreate}
+          onTagUpdate={onTagUpdate}
+          onTagDelete={onTagDelete}
+          onClose={closeRailPanel}
+        />
+      )}
+      {railPanel === 'appearance' && (
+        <AppearancePanel
+          settings={settings}
+          onSettingsChange={onSettingsChange}
+          onClose={closeRailPanel}
+        />
+      )}
 
       <main className="calendar-workspace">
         <header className="app-header">
@@ -1321,7 +2440,12 @@ function MainView(props: SharedViewProps) {
             >
               <MonitorUp size={17} /> 위젯 띄우기
             </button>
-            <button type="button" className="primary-button header-add" onClick={() => openCreate()}>
+            <button
+              type="button"
+              className="primary-button header-add"
+              onClick={() => openCreate()}
+              aria-label={`${formatCompactDate(selectedRange.startDate)}부터 ${formatCompactDate(selectedRange.endDate)}까지 새 일정`}
+            >
               <Plus size={17} /> 새 일정
             </button>
           </div>
@@ -1369,28 +2493,66 @@ function MainView(props: SharedViewProps) {
               </div>
             </div>
             <div className="calendar-hint">
-              <span><i className="hint-dot active" /> 활성</span>
-              <span><i className="hint-dot done" /> 비활성</span>
+              <span className="range-selection-summary" data-qa="range-selection-summary"><CalendarRange size={13} /> {selectedRange.startDate === selectedRange.endDate ? formatCompactDate(selectedRange.startDate) : `${formatCompactDate(selectedRange.startDate)}–${formatCompactDate(selectedRange.endDate)}`}</span>
             </div>
           </div>
 
           <div className="weekday-row" aria-hidden="true">
             {WEEKDAYS.map((day, index) => <span key={day} className={index === 0 ? 'is-sunday' : index === 6 ? 'is-saturday' : ''}>{day}</span>)}
           </div>
-          <div className="calendar-grid">
+          <div
+            ref={calendarGridRef}
+            className="calendar-grid"
+            data-range-start={selectedRange.startDate}
+            data-range-end={selectedRange.endDate}
+            data-max-lanes={calendarMaxLanes}
+            onPointerMove={extendRangeFromGrid}
+          >
             {days.map((day) => {
-              const dayTasks = sortTasks(filtered.filter((task) => task.dueDate === day.key))
-              const hiddenCount = Math.max(0, dayTasks.length - 3)
+              const taskCount = calendarTaskLayout.dayCounts[day.key] ?? { total: 0, visible: 0, hidden: 0 }
               const selected = selectedDate === day.key
+              const inRange = dateRangeContains(selectedRange.startDate, selectedRange.endDate, day.key)
+              const weekday = day.date.getDay()
+              const holiday = getKoreanHoliday(day.key)
+              const dayTone = getCalendarDayTone(day.key)
               return (
                 <div
                   key={day.key}
-                  className={`calendar-cell ${!day.inCurrentMonth ? 'is-outside' : ''} ${day.key === today ? 'is-today' : ''} ${selected ? 'is-selected' : ''}`}
+                  data-date={day.key}
+                  data-day-tone={dayTone}
+                  data-holiday-name={holiday?.name}
+                  data-task-count={taskCount.total}
+                  data-hidden-count={taskCount.hidden}
+                  data-template-drop-target
+                  data-range-selected={inRange || undefined}
+                  className={`calendar-cell ${weekday === 0 ? 'is-sunday' : ''} ${weekday === 6 ? 'is-saturday' : ''} ${holiday ? 'is-holiday' : ''} ${!day.inCurrentMonth ? 'is-outside' : ''} ${day.key === today ? 'is-today' : ''} ${selected ? 'is-selected' : ''} ${inRange ? 'is-in-range' : ''} ${day.key === selectedRange.startDate ? 'is-range-start' : ''} ${day.key === selectedRange.endDate ? 'is-range-end' : ''}`}
                   role="button"
                   tabIndex={day.inCurrentMonth ? 0 : -1}
-                  aria-label={`${formatFullDate(day.key)}, 일정 ${dayTasks.length}개`}
-                  onClick={() => chooseDate(day.key)}
+                  aria-pressed={inRange}
+                  aria-label={`${formatFullDate(day.key)}${holiday ? `, ${holiday.name}` : ''}, 일정 ${taskCount.total}개`}
+                  title={holiday?.name}
+                  onPointerDown={(event) => beginRange(event, day.key)}
+                  onPointerEnter={(event) => extendRange(event, day.key)}
+                  onClick={() => {
+                    if (rangeMovedRef.current) {
+                      rangeMovedRef.current = false
+                      return
+                    }
+                    chooseDate(day.key)
+                  }}
                   onDoubleClick={() => openCreate(day.key)}
+                  onDragOver={(event) => {
+                    if (!event.dataTransfer.types.includes('application/x-dayline-template')) return
+                    event.preventDefault()
+                    event.dataTransfer.dropEffect = 'copy'
+                  }}
+                  onDrop={(event) => {
+                    const templateId = event.dataTransfer.getData('application/x-dayline-template')
+                    if (!templateId) return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onTemplateInstantiate(templateId, day.key)
+                  }}
                   onKeyDown={(event) => handleCellKey(event, day.key)}
                 >
                   <div className="cell-topline">
@@ -1407,15 +2569,39 @@ function MainView(props: SharedViewProps) {
                       <Plus size={13} />
                     </button>
                   </div>
-                  <div className="cell-tasks">
-                    {dayTasks.slice(0, 3).map((task) => (
-                      <TaskChip key={task.id} task={task} onOpen={openTask} onSecondaryAction={onTaskSecondaryAction} />
-                    ))}
-                    {hiddenCount > 0 && <span className="more-tasks">+ {hiddenCount}개 더 보기</span>}
-                  </div>
+                  {taskCount.hidden > 0 && (
+                    <span
+                      className="calendar-task-overflow"
+                      data-date={day.key}
+                      data-hidden-count={taskCount.hidden}
+                      aria-label={`숨겨진 일정 ${taskCount.hidden}개`}
+                      title={`이 날짜에 일정 ${taskCount.hidden}개가 더 있어요`}
+                    >
+                      +{taskCount.hidden}
+                    </span>
+                  )}
                 </div>
               )
             })}
+            <div className="calendar-task-layout" data-qa="calendar-task-layout" role="group" aria-label="캘린더 일정 순서">
+              {calendarTaskLayout.segments.map((segment) => {
+                const task = calendarTaskById.get(segment.taskId)
+                if (!task) return null
+                return (
+                  <TaskChip
+                    key={`${segment.taskId}:${segment.weekRow}`}
+                    task={task}
+                    tags={taskTags}
+                    segment={segment}
+                    onOpen={openTask}
+                    onSecondaryAction={onTaskSecondaryAction}
+                    onMove={moveCalendarTask}
+                    onDropTask={reorderCalendarTasksByDrop}
+                    onDropTemplate={dropTemplateAtCalendarPoint}
+                  />
+                )
+              })}
+            </div>
           </div>
         </section>
       </main>
@@ -1430,14 +2616,18 @@ function MainView(props: SharedViewProps) {
             type="button"
             className="round-add"
             onClick={() => setNoteCreateRequest((current) => current + 1)}
-            aria-label="선택한 날짜에 순간 메모 추가"
-            title="순간 메모 추가"
+            aria-label="선택한 날짜에 퀵 노트 추가"
+            title="퀵 노트 추가"
           >
             <Plus size={19} />
           </button>
         </header>
 
-        <div className="day-panel-body">
+        <div
+          className="day-panel-body"
+          data-split-container
+          style={{ gridTemplateRows: `minmax(0, ${sidebarSplit}fr) 9px minmax(0, ${100 - sidebarSplit}fr)` }}
+        >
           <DailyNotesSection
             selectedDate={selectedDate}
             notes={selectedDailyNotes}
@@ -1448,6 +2638,17 @@ function MainView(props: SharedViewProps) {
             onUpdate={onDailyNoteUpdate}
             onToggle={onDailyNoteToggle}
             onDelete={onDailyNoteDelete}
+            onMove={moveNote}
+            onDropNote={reorderNotesByDrop}
+          />
+
+          <SplitHandle
+            qa="sidebar-splitter"
+            value={sidebarSplit}
+            onPreview={setSidebarSplit}
+            onCommit={(value) => {
+              if (!onSettingsChange({ sidebarSplit: value })) setSidebarSplit(settings.sidebarSplit)
+            }}
           />
 
           <section className="schedule-section" data-qa="schedule-section" aria-labelledby="schedule-section-title">
@@ -1466,10 +2667,14 @@ function MainView(props: SharedViewProps) {
                   <TaskRow
                     key={task.id}
                     task={task}
+                    tags={taskTags}
                     onOpen={openTask}
                     onSecondaryAction={onTaskSecondaryAction}
                     onSubTaskToggle={onSubTaskToggle}
+                    onMove={moveTask}
+                    onDropTask={reorderTasksByDrop}
                     showSubTasks
+                    reorderable
                   />
                 ))
               )}
@@ -1480,8 +2685,10 @@ function MainView(props: SharedViewProps) {
 
       <TaskModal
         open={modalOpen}
-        initialDate={selectedDate}
+        initialStartDate={selectedRange.startDate}
+        initialEndDate={selectedRange.endDate}
         task={editingTask}
+        tags={taskTags}
         onClose={() => {
           setModalOpen(false)
           setEditingTask(null)
@@ -1491,14 +2698,15 @@ function MainView(props: SharedViewProps) {
             ? onUpdate(id, changes ?? { draft: {} })
             : onCreate(draft)
           if (!saved) return
-          setSelectedDate(draft.dueDate)
-          setMonth(startOfMonth(fromDateKey(draft.dueDate)))
+          setSelectedDate(draft.startDate)
+          setSelectedRange({ startDate: draft.startDate, endDate: draft.dueDate })
+          setMonth(startOfMonth(fromDateKey(draft.startDate)))
           setModalOpen(false)
           setEditingTask(null)
         }}
         onDelete={onTaskDelete}
       />
-      <RecoveryPanel open={recoveryOpen} tasks={deleted} onClose={() => setRecoveryOpen(false)} onRestore={onTaskRestore} />
+      <RecoveryPanel open={recoveryOpen} tasks={deleted} onClose={closeRecovery} onRestore={onTaskRestore} />
     </div>
   )
 }
@@ -1506,11 +2714,20 @@ function MainView(props: SharedViewProps) {
 function WidgetView(props: SharedViewProps) {
   const {
     tasks,
+    dailyNotes,
+    taskTags,
+    settings,
     loading,
     error,
     migrationWarning,
     onTaskSecondaryAction,
     onTaskDelete,
+    onSubTaskToggle,
+    onDailyNoteCreate,
+    onDailyNoteUpdate,
+    onDailyNoteToggle,
+    onDailyNoteDelete,
+    onSettingsChange,
     onCreate,
     onUpdate,
   } = props
@@ -1518,12 +2735,18 @@ function WidgetView(props: SharedViewProps) {
   const [selectedDate, setSelectedDate] = useState(today)
   const [quickTitle, setQuickTitle] = useState('')
   const [widgetState, setWidgetState] = useState<WidgetState>({ pinned: true, locked: false })
+  const [widgetSplit, setWidgetSplit] = useState(settings.widgetSplit)
+  const [noteComposerOpen, setNoteComposerOpen] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const active = useMemo(() => visibleTasks(tasks), [tasks])
   const selectedTasks = useMemo(
-    () => sortTasks(active.filter((task) => task.dueDate === selectedDate)),
+    () => sortTasks(active.filter((task) => taskOccursOnDate(task, selectedDate))),
     [active, selectedDate],
+  )
+  const selectedDailyNotes = useMemo(
+    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
+    [dailyNotes, selectedDate],
   )
   const completedCount = selectedTasks.filter((task) => task.completed).length
   const week = useMemo(() => weekDaysAround(selectedDate), [selectedDate])
@@ -1532,22 +2755,26 @@ function WidgetView(props: SharedViewProps) {
     void window.dayline?.getWidgetState().then(setWidgetState)
   }, [])
 
+  useEffect(() => setWidgetSplit(settings.widgetSplit), [settings.widgetSplit])
+
   const addQuickTask = (event: FormEvent) => {
     event.preventDefault()
     if (!quickTitle.trim()) return
+    const defaultTag = sortedPositioned(taskTags)[0]
     const saved = onCreate({
       title: quickTitle.trim(),
       note: '',
+      startDate: selectedDate,
       dueDate: selectedDate,
       dueTime: null,
-      color: 'coral',
+      color: defaultTag?.legacyColor ?? 'coral',
+      tagId: defaultTag?.id ?? null,
       subTasks: [],
     })
     if (saved) setQuickTitle('')
   }
 
   const openTask = (task: Task) => {
-    setSelectedDate(task.dueDate)
     setEditingTask(task)
     setModalOpen(true)
   }
@@ -1608,25 +2835,29 @@ function WidgetView(props: SharedViewProps) {
         </section>
 
         <div className="widget-week" role="group" aria-label="이번 주 날짜 선택">
-          {week.map((day) => (
-            <button
-              type="button"
-              key={day.key}
-              className={`${selectedDate === day.key ? 'is-selected' : ''} ${today === day.key ? 'is-today' : ''}`}
-              onClick={() => setSelectedDate(day.key)}
-              aria-label={formatFullDate(day.key)}
-            >
-              <span>{day.weekday}</span>
-              <strong>{day.day}</strong>
-              <i>{active.some((task) => task.dueDate === day.key && !task.completed) ? '•' : ''}</i>
-            </button>
-          ))}
+          {week.map((day) => {
+            const weekday = fromDateKey(day.key).getDay()
+            const holiday = getKoreanHoliday(day.key)
+            const dayTone = getCalendarDayTone(day.key)
+            return (
+              <button
+                type="button"
+                key={day.key}
+                data-date={day.key}
+                data-day-tone={dayTone}
+                data-holiday-name={holiday?.name}
+                className={`${weekday === 0 ? 'is-sunday' : ''} ${weekday === 6 ? 'is-saturday' : ''} ${holiday ? 'is-holiday' : ''} ${selectedDate === day.key ? 'is-selected' : ''} ${today === day.key ? 'is-today' : ''}`}
+                onClick={() => setSelectedDate(day.key)}
+                aria-label={`${formatFullDate(day.key)}${holiday ? `, ${holiday.name}` : ''}`}
+                title={holiday?.name}
+              >
+                <span>{day.weekday}</span>
+                <strong>{day.day}</strong>
+                <i>{active.some((task) => taskOccursOnDate(task, day.key) && !task.completed) ? '•' : ''}</i>
+              </button>
+            )
+          })}
         </div>
-
-        <section className="widget-progress">
-          <div><span>진행</span><strong>{completedCount}/{selectedTasks.length}</strong></div>
-          <div className="progress-track"><span style={{ width: `${selectedTasks.length ? (completedCount / selectedTasks.length) * 100 : 0}%` }} /></div>
-        </section>
 
         {error && <div className="widget-error">{error}</div>}
         {migrationWarning && (
@@ -1634,42 +2865,93 @@ function WidgetView(props: SharedViewProps) {
             기존 일정 파일을 읽지 못했어요. 원본을 보존했고 다음 실행 때 다시 시도합니다.
           </div>
         )}
-        <section className="widget-task-list" aria-label="선택한 날짜의 일정">
-          {selectedTasks.length === 0 ? (
-            <EmptyState compact />
-          ) : (
-            selectedTasks.map((task) => (
-              <TaskRow key={task.id} task={task} compact onOpen={openTask} onSecondaryAction={onTaskSecondaryAction} />
-            ))
-          )}
-        </section>
 
-        <form className="quick-add" onSubmit={addQuickTask}>
-          <Plus size={17} />
-          <input
-            value={quickTitle}
-            onChange={(event) => setQuickTitle(event.target.value)}
-            placeholder="빠르게 일정 추가"
-            aria-label="빠르게 일정 추가"
+        <div
+          className="widget-split-body"
+          data-split-container
+          style={{ gridTemplateRows: `minmax(0, ${widgetSplit}fr) 9px minmax(0, ${100 - widgetSplit}fr)` }}
+        >
+          <section className="widget-schedule-pane" data-qa="widget-schedule" aria-labelledby="widget-schedule-title">
+            <div className="panel-section-heading widget-pane-heading">
+              <div><span className="eyebrow">SCHEDULE</span><strong id="widget-schedule-title">일정</strong></div>
+              <span>{selectedTasks.length}</span>
+            </div>
+            <section className="widget-progress" aria-label={`완료 ${completedCount}개, 전체 ${selectedTasks.length}개`}>
+              <div><span>진행</span><strong>{completedCount}/{selectedTasks.length}</strong></div>
+              <div className="progress-track"><span style={{ width: `${selectedTasks.length ? (completedCount / selectedTasks.length) * 100 : 0}%` }} /></div>
+            </section>
+            <form className="quick-add" onSubmit={addQuickTask}>
+              <Plus size={17} />
+              <input
+                value={quickTitle}
+                onChange={(event) => setQuickTitle(event.target.value)}
+                placeholder="빠르게 일정 추가"
+                aria-label="빠르게 일정 추가"
+              />
+              <button type="submit" disabled={!quickTitle.trim()}>추가</button>
+            </form>
+            <div className="widget-task-list" aria-label="선택한 날짜의 일정">
+              {selectedTasks.length === 0 ? (
+                <EmptyState compact />
+              ) : (
+                selectedTasks.map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    tags={taskTags}
+                    compact
+                    showSubTasks
+                    onOpen={openTask}
+                    onSecondaryAction={onTaskSecondaryAction}
+                    onSubTaskToggle={onSubTaskToggle}
+                  />
+                ))
+              )}
+            </div>
+          </section>
+
+          <SplitHandle
+            qa="widget-splitter"
+            value={widgetSplit}
+            onPreview={setWidgetSplit}
+            onCommit={(value) => {
+              if (!onSettingsChange({ widgetSplit: value })) setWidgetSplit(settings.widgetSplit)
+            }}
           />
-          <button type="submit" disabled={!quickTitle.trim()}>추가</button>
-        </form>
-        <p className="widget-tip">좌클릭 상세 · 우클릭 활성 → 비활성 → 최근 삭제</p>
+
+          <div className="widget-quick-note-pane" data-qa="widget-quick-notes">
+            <DailyNotesSection
+              selectedDate={selectedDate}
+              notes={selectedDailyNotes}
+              composerOpen={noteComposerOpen}
+              createRequest={0}
+              onComposerOpenChange={setNoteComposerOpen}
+              onCreate={onDailyNoteCreate}
+              onUpdate={onDailyNoteUpdate}
+              onToggle={onDailyNoteToggle}
+              onDelete={onDailyNoteDelete}
+              reorderable={false}
+              showHeaderAdd
+            />
+          </div>
+        </div>
       </main>
 
       {!widgetState.locked && <span className="resize-corner" aria-hidden="true" />}
       </div>
       <TaskModal
         open={modalOpen}
-        initialDate={selectedDate}
+        initialStartDate={selectedDate}
+        initialEndDate={selectedDate}
         task={editingTask}
+        tags={taskTags}
         onClose={() => {
           setModalOpen(false)
           setEditingTask(null)
         }}
         onSave={(draft, id, changes) => {
           if (id && !onUpdate(id, changes ?? { draft: {} })) return
-          setSelectedDate(draft.dueDate)
+          setSelectedDate(draft.startDate)
           setModalOpen(false)
           setEditingTask(null)
         }}
@@ -1684,6 +2966,13 @@ export default function App({ mode }: { mode: AppMode }) {
   const [toast, setToast] = useState<ToastMessage | null>(null)
   const toastId = useRef(0)
   const secondaryActionGuard = useRef<Record<string, number>>({})
+
+  useEffect(() => {
+    const root = document.documentElement
+    for (const [property, value] of Object.entries(themeVariables(store.settings))) {
+      root.style.setProperty(property, value)
+    }
+  }, [store.settings])
 
   const showToast = useCallback((message: string, actionLabel?: string, onAction?: () => void) => {
     toastId.current += 1
@@ -1734,6 +3023,7 @@ export default function App({ mode }: { mode: AppMode }) {
     const task: Task = {
       id: crypto.randomUUID(),
       ...draft,
+      position: nextPosition(storeRef.current.tasks),
       completed: false,
       completedAt: null,
       deletedAt: null,
@@ -1744,15 +3034,33 @@ export default function App({ mode }: { mode: AppMode }) {
     if (!commit((current) => ({ ...current, tasks: [...current.tasks, task] }))) return false
     showToast('새 일정을 캘린더에 추가했어요.')
     return true
-  }, [commit, showToast])
+  }, [commit, showToast, storeRef])
 
   const handleUpdate = useCallback((id: string, changes: TaskEditChanges) => {
     const now = new Date()
     const timestamp = now.toISOString()
     delete secondaryActionGuard.current[id]
+    const openingLatest = storeRef.current.tasks.find((task) => task.id === id && !task.deletedAt)
+    if (!openingLatest) {
+      showToast('다른 창에서 이미 삭제된 일정이라 변경을 저장하지 못했어요.')
+      return false
+    }
+    const openingStart = changes.draft.startDate ?? openingLatest.startDate
+    const openingEnd = changes.draft.dueDate ?? openingLatest.dueDate
+    if (openingEnd < openingStart) {
+      showToast('다른 창에서 일정 기간이 바뀌었어요. 상세 창을 다시 열어 기간을 확인해 주세요.')
+      return false
+    }
+    let dateConflict = false
     const saved = commit((current) => {
       const latestTask = current.tasks.find((task) => task.id === id && !task.deletedAt)
       if (!latestTask) return current
+      const nextStart = changes.draft.startDate ?? latestTask.startDate
+      const nextEnd = changes.draft.dueDate ?? latestTask.dueDate
+      if (nextEnd < nextStart) {
+        dateConflict = true
+        return current
+      }
       const draftChanges = applyTaskEditChanges(latestTask, changes)
       const withDraft = current.tasks.map((task) => task.id === id
         ? { ...task, ...draftChanges, updatedAt: timestamp }
@@ -1773,9 +3081,13 @@ export default function App({ mode }: { mode: AppMode }) {
               : task),
       }
     })
+    if (dateConflict) {
+      showToast('다른 창에서 일정 기간이 바뀌었어요. 상세 창을 다시 열어 기간을 확인해 주세요.')
+      return false
+    }
     if (saved) showToast('일정 변경을 저장했어요.')
     return saved
-  }, [commit, showToast])
+  }, [commit, showToast, storeRef])
 
   const handleSubTaskToggle = useCallback((taskId: string, subTaskId: string) => {
     const before = storeRef.current.tasks
@@ -1797,13 +3109,14 @@ export default function App({ mode }: { mode: AppMode }) {
       noteDate,
       completed: false,
       completedAt: null,
+      position: nextPosition(storeRef.current.dailyNotes.filter((note) => note.noteDate === noteDate)),
       createdAt: timestamp,
       updatedAt: timestamp,
     }
     if (!commit((current) => ({ ...current, dailyNotes: [...current.dailyNotes, note] }))) return false
-    showToast('순간 메모를 기록했어요.')
+    showToast('퀵 노트를 기록했어요.')
     return true
-  }, [commit, showToast])
+  }, [commit, showToast, storeRef])
 
   const handleDailyNoteUpdate = useCallback((id: string, content: string) => {
     const timestamp = new Date().toISOString()
@@ -1813,7 +3126,7 @@ export default function App({ mode }: { mode: AppMode }) {
         ? { ...note, content, updatedAt: timestamp }
         : note),
     }))
-    if (saved) showToast('순간 메모를 수정했어요.')
+    if (saved) showToast('퀵 노트를 수정했어요.')
     return saved
   }, [commit, showToast])
 
@@ -1837,12 +3150,162 @@ export default function App({ mode }: { mode: AppMode }) {
       ...current,
       dailyNotes: current.dailyNotes.filter((note) => note.id !== id),
     }))) return
-    showToast('순간 메모를 삭제했어요.')
+    showToast('퀵 노트를 삭제했어요.')
   }, [commit, showToast])
+
+  const handleTaskReorder = useCallback((orderedIds: string[]) => {
+    if (orderedIds.length < 2) return true
+    return commit((current) => ({
+      ...current,
+      tasks: reorderTaskSubset(current.tasks, orderedIds),
+    }))
+  }, [commit])
+
+  const handleDailyNoteReorder = useCallback((orderedIds: string[]) => {
+    if (orderedIds.length < 2) return true
+    return commit((current) => ({
+      ...current,
+      dailyNotes: reorderPositioned(current.dailyNotes, orderedIds),
+    }))
+  }, [commit])
+
+  const handleSettingsChange = useCallback((changes: Partial<AppSettings>) => {
+    const safe: Partial<AppSettings> = {
+      ...(typeof changes.sidebarSplit === 'number' ? { sidebarSplit: clamp(changes.sidebarSplit, 20, 80) } : {}),
+      ...(typeof changes.widgetSplit === 'number' ? { widgetSplit: clamp(changes.widgetSplit, 20, 80) } : {}),
+      ...(typeof changes.fontScale === 'number' ? { fontScale: clamp(changes.fontScale, 0.85, 1.3) } : {}),
+      ...(changes.themeColor ? { themeColor: normalizedHex(changes.themeColor, storeRef.current.settings.themeColor) } : {}),
+    }
+    return commit((current) => ({ ...current, settings: { ...current.settings, ...safe } }))
+  }, [commit, storeRef])
+
+  const handleTagCreate = useCallback((name: string, color: string) => {
+    const cleanName = name.trim()
+    if (!cleanName) return false
+    const timestamp = new Date().toISOString()
+    const tag: TaskTag = {
+      id: crypto.randomUUID(),
+      name: cleanName,
+      color: normalizedHex(color, TAG_PALETTE[0]),
+      builtIn: false,
+      legacyColor: null,
+      position: nextPosition(storeRef.current.taskTags),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const saved = commit((current) => ({ ...current, taskTags: [...current.taskTags, tag] }))
+    if (saved) showToast('새 태그를 추가했어요.')
+    return saved
+  }, [commit, showToast, storeRef])
+
+  const handleTagUpdate = useCallback((id: string, changes: Partial<Pick<TaskTag, 'name' | 'color'>>) => {
+    const currentTag = storeRef.current.taskTags.find((tag) => tag.id === id)
+    if (!currentTag) return false
+    const nextName = typeof changes.name === 'string' ? changes.name.trim() : currentTag.name
+    if (!nextName) return false
+    const timestamp = new Date().toISOString()
+    const saved = commit((current) => ({
+      ...current,
+      taskTags: current.taskTags.map((tag) => tag.id === id
+        ? {
+            ...tag,
+            ...(typeof changes.name === 'string' ? { name: nextName } : {}),
+            ...(typeof changes.color === 'string' ? { color: normalizedHex(changes.color, tag.color) } : {}),
+            updatedAt: timestamp,
+          }
+        : tag),
+    }))
+    if (saved) showToast('태그 설정을 저장했어요.')
+    return saved
+  }, [commit, showToast, storeRef])
+
+  const handleTagDelete = useCallback((id: string) => {
+    const tag = storeRef.current.taskTags.find((item) => item.id === id)
+    if (!tag || tag.builtIn) return
+    if (!commit((current) => ({
+      ...current,
+      taskTags: current.taskTags.filter((item) => item.id !== id),
+    }))) return
+    showToast('사용자 태그를 삭제했어요. 기존 일정은 태그 없음으로 유지돼요.')
+  }, [commit, showToast, storeRef])
+
+  const handleTemplateSave = useCallback((draft: TemplateDraft, id?: string, openingSnapshot?: TaskTemplate) => {
+    const timestamp = new Date().toISOString()
+    const safeDraft = {
+      ...draft,
+      title: draft.title.trim(),
+      note: draft.note.trim(),
+      durationDays: clamp(Math.round(draft.durationDays), 1, 365),
+      subTaskTitles: draft.subTaskTitles.map((title) => title.trim()).filter(Boolean),
+    }
+    if (!safeDraft.title) return false
+    if (id && !storeRef.current.taskTemplates.some((template) => template.id === id)) {
+      showToast('다른 창에서 이미 삭제된 템플릿이라 저장하지 못했어요.')
+      return false
+    }
+    const saved = commit((current) => id
+      ? {
+          ...current,
+          taskTemplates: current.taskTemplates.map((template) => {
+            if (template.id !== id) return template
+            const baseline = openingSnapshot
+            const patch: Partial<TemplateDraft> = {}
+            if (!baseline || safeDraft.title !== baseline.title) patch.title = safeDraft.title
+            if (!baseline || safeDraft.note !== baseline.note) patch.note = safeDraft.note
+            if (!baseline || safeDraft.dueTime !== baseline.dueTime) patch.dueTime = safeDraft.dueTime
+            if (!baseline || safeDraft.tagId !== baseline.tagId) patch.tagId = safeDraft.tagId
+            if (!baseline || safeDraft.legacyColor !== baseline.legacyColor) patch.legacyColor = safeDraft.legacyColor
+            if (!baseline || safeDraft.durationDays !== baseline.durationDays) patch.durationDays = safeDraft.durationDays
+            if (!baseline || safeDraft.subTaskTitles.length !== baseline.subTaskTitles.length
+              || safeDraft.subTaskTitles.some((title, index) => title !== baseline.subTaskTitles[index])) {
+              patch.subTaskTitles = safeDraft.subTaskTitles
+            }
+            return Object.keys(patch).length === 0
+              ? template
+              : { ...template, ...patch, updatedAt: timestamp }
+          }),
+        }
+      : {
+          ...current,
+          taskTemplates: [
+            ...current.taskTemplates,
+            {
+              id: crypto.randomUUID(),
+              ...safeDraft,
+              position: nextPosition(current.taskTemplates),
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            },
+          ],
+        })
+    if (saved) showToast(id ? '반복 일정 템플릿을 수정했어요.' : '반복 일정 템플릿을 추가했어요.')
+    return saved
+  }, [commit, showToast, storeRef])
+
+  const handleTemplateDelete = useCallback((id: string) => {
+    if (!commit((current) => ({
+      ...current,
+      taskTemplates: current.taskTemplates.filter((template) => template.id !== id),
+    }))) return false
+    showToast('반복 일정 템플릿을 삭제했어요.')
+    return true
+  }, [commit, showToast])
+
+  const handleTemplateInstantiate = useCallback((id: string, startDate: string) => {
+    const template = storeRef.current.taskTemplates.find((item) => item.id === id)
+    if (!template) return false
+    const task = createTaskFromTemplate(template, startDate, nextPosition(storeRef.current.tasks))
+    if (!commit((current) => ({ ...current, tasks: [...current.tasks, task] }))) return false
+    showToast(`${formatCompactDate(startDate)}에 반복 일정을 추가했어요.`)
+    return true
+  }, [commit, showToast, storeRef])
 
   const shared: SharedViewProps = {
     tasks: store.tasks,
     dailyNotes: store.dailyNotes,
+    taskTags: store.taskTags,
+    settings: store.settings,
+    taskTemplates: store.taskTemplates,
     loading,
     error,
     migrationWarning: store.migrationWarning,
@@ -1854,6 +3317,15 @@ export default function App({ mode }: { mode: AppMode }) {
     onDailyNoteUpdate: handleDailyNoteUpdate,
     onDailyNoteToggle: handleDailyNoteToggle,
     onDailyNoteDelete: handleDailyNoteDelete,
+    onTaskReorder: handleTaskReorder,
+    onDailyNoteReorder: handleDailyNoteReorder,
+    onSettingsChange: handleSettingsChange,
+    onTagCreate: handleTagCreate,
+    onTagUpdate: handleTagUpdate,
+    onTagDelete: handleTagDelete,
+    onTemplateSave: handleTemplateSave,
+    onTemplateDelete: handleTemplateDelete,
+    onTemplateInstantiate: handleTemplateInstantiate,
     onCreate: handleCreate,
     onUpdate: handleUpdate,
   }

@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from '../types'
-import { applyTaskEditChanges, getTaskEditChanges, type TaskDraft } from './taskDraft'
+import { applyTaskEditChanges, createTaskFromTemplate, getTaskEditChanges, type TaskDraft } from './taskDraft'
 
 const task: Task = {
   id: 'task-1',
   title: '기존 제목',
   note: '다른 창에서 유지할 메모',
+  startDate: '2026-08-11',
   dueDate: '2026-08-11',
   dueTime: null,
   color: 'coral',
+  tagId: 'builtin-coral',
+  position: 0,
   completed: false,
   completedAt: null,
   deletedAt: null,
@@ -30,9 +33,11 @@ const task: Task = {
 const draft: TaskDraft = {
   title: task.title,
   note: task.note,
+  startDate: task.startDate,
   dueDate: task.dueDate,
   dueTime: task.dueTime,
   color: task.color,
+  tagId: task.tagId,
   subTasks: task.subTasks,
 }
 
@@ -133,9 +138,11 @@ describe('getTaskEditChanges', () => {
     const childDerivedDraft: TaskDraft = {
       title: completedTask.title,
       note: completedTask.note,
+      startDate: completedTask.startDate,
       dueDate: completedTask.dueDate,
       dueTime: completedTask.dueTime,
       color: completedTask.color,
+      tagId: completedTask.tagId,
       subTasks: completedTask.subTasks.map((subTask, index) => index === 0
         ? { ...subTask, completed: false, completedAt: null }
         : subTask),
@@ -155,5 +162,37 @@ describe('getTaskEditChanges', () => {
       })),
     }, false, true)
     expect(explicitParent).toMatchObject({ completed: false, cascadeSubTasks: true })
+  })
+})
+
+describe('createTaskFromTemplate', () => {
+  it('creates an inclusive duration and fresh child rows at the requested position', () => {
+    const ids = ['task-from-template', 'child-one', 'child-two']
+    const created = createTaskFromTemplate({
+      id: 'template-1',
+      title: '주간 계획',
+      note: '템플릿 메모',
+      dueTime: '09:30',
+      tagId: 'builtin-blue',
+      legacyColor: 'blue',
+      durationDays: 3,
+      subTaskTitles: ['첫 단계', '둘째 단계'],
+      position: 0,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    }, '2026-08-11', 4, new Date('2026-08-11T03:00:00.000Z'), () => ids.shift()!)
+
+    expect(created).toMatchObject({
+      id: 'task-from-template',
+      startDate: '2026-08-11',
+      dueDate: '2026-08-13',
+      tagId: 'builtin-blue',
+      color: 'blue',
+      position: 4,
+    })
+    expect(created.subTasks.map(({ id, title }) => ({ id, title }))).toEqual([
+      { id: 'child-one', title: '첫 단계' },
+      { id: 'child-two', title: '둘째 단계' },
+    ])
   })
 })

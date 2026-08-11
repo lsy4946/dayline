@@ -13,9 +13,12 @@ export interface Task {
   id: string
   title: string
   note: string
+  startDate: string
   dueDate: string
   dueTime: string | null
   color: TaskColor
+  tagId: string | null
+  position: number
   completed: boolean
   completedAt: string | null
   deletedAt: string | null
@@ -31,6 +34,39 @@ export interface DailyNote {
   noteDate: string
   completed: boolean
   completedAt: string | null
+  position: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TaskTag {
+  id: string
+  name: string
+  color: string
+  builtIn: boolean
+  legacyColor: TaskColor | null
+  position: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AppSettings {
+  sidebarSplit: number
+  widgetSplit: number
+  fontScale: number
+  themeColor: string
+}
+
+export interface TaskTemplate {
+  id: string
+  title: string
+  note: string
+  dueTime: string | null
+  tagId: string | null
+  legacyColor: TaskColor
+  durationDays: number
+  subTaskTitles: string[]
+  position: number
   createdAt: string
   updatedAt: string
 }
@@ -45,6 +81,9 @@ export interface DaylineStore {
   revision: number
   tasks: Task[]
   dailyNotes: DailyNote[]
+  taskTags: TaskTag[]
+  settings: AppSettings
+  taskTemplates: TaskTemplate[]
   migrationWarning: LegacyMigrationWarning | null
 }
 
@@ -52,9 +91,12 @@ export type TaskPatch = Partial<Pick<
   Task,
   | 'title'
   | 'note'
+  | 'startDate'
   | 'dueDate'
   | 'dueTime'
   | 'color'
+  | 'tagId'
+  | 'position'
   | 'completed'
   | 'completedAt'
   | 'deletedAt'
@@ -69,7 +111,27 @@ export type SubTaskPatch = Partial<Pick<
 
 export type DailyNotePatch = Partial<Pick<
   DailyNote,
-  'content' | 'noteDate' | 'completed' | 'completedAt' | 'updatedAt'
+  'content' | 'noteDate' | 'completed' | 'completedAt' | 'position' | 'updatedAt'
+>>
+
+export type TaskTagPatch = Partial<Pick<
+  TaskTag,
+  'name' | 'color' | 'position' | 'updatedAt'
+>>
+
+export type AppSettingsPatch = Partial<AppSettings>
+
+export type TaskTemplatePatch = Partial<Pick<
+  TaskTemplate,
+  | 'title'
+  | 'note'
+  | 'dueTime'
+  | 'tagId'
+  | 'legacyColor'
+  | 'durationDays'
+  | 'subTaskTitles'
+  | 'position'
+  | 'updatedAt'
 >>
 
 export type StoreMutation =
@@ -81,6 +143,13 @@ export type StoreMutation =
   | { type: 'daily-note:create'; note: DailyNote }
   | { type: 'daily-note:patch'; id: string; changes: DailyNotePatch }
   | { type: 'daily-note:delete'; id: string }
+  | { type: 'tag:create'; tag: TaskTag }
+  | { type: 'tag:patch'; id: string; changes: TaskTagPatch }
+  | { type: 'tag:delete'; id: string }
+  | { type: 'settings:patch'; changes: AppSettingsPatch }
+  | { type: 'template:create'; template: TaskTemplate }
+  | { type: 'template:patch'; id: string; changes: TaskTemplatePatch }
+  | { type: 'template:delete'; id: string }
 
 export interface WidgetState {
   bounds?: { x?: number; y?: number; width: number; height: number }

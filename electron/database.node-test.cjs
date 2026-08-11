@@ -14,11 +14,15 @@ function makeTask(overrides = {}) {
     id: 'task-1',
     title: '한글 일정',
     note: '메모 내용',
+    startDate: '2026-09-09',
     dueDate: '2026-09-09',
     dueTime: null,
     color: 'coral',
+    tagId: 'builtin-coral',
+    position: 0,
     completed: false,
     completedAt: null,
+    position: 0,
     deletedAt: null,
     previousCompleted: null,
     createdAt: '2026-09-01T00:00:00.000Z',
@@ -296,6 +300,55 @@ test('applies field-level mutations without losing unrelated changes or reviving
   database.close()
 })
 
+test('rejects a stale date patch that would invert the canonical range and rolls back its batch', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({
+    version: 1,
+    tasks: [
+      makeTask({
+        id: 'range-target',
+        startDate: '2026-08-10',
+        dueDate: '2026-08-20',
+        position: 0,
+      }),
+      makeTask({ id: 'batch-peer', title: '원래 제목', position: 1 }),
+    ],
+  }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+
+  const latest = database.applyStoreMutations([{
+    type: 'task:patch',
+    id: 'range-target',
+    changes: { dueDate: '2026-08-12', updatedAt: '2026-09-09T04:01:00.000Z' },
+  }])
+  assert.equal(latest.tasks.find((task) => task.id === 'range-target').dueDate, '2026-08-12')
+  const revisionBeforeRejectedBatch = latest.revision
+
+  assert.throws(
+    () => database.applyStoreMutations([
+      {
+        type: 'task:patch',
+        id: 'batch-peer',
+        changes: { title: '롤백되어야 할 제목', updatedAt: '2026-09-09T04:02:00.000Z' },
+      },
+      {
+        type: 'task:patch',
+        id: 'range-target',
+        changes: { startDate: '2026-08-15', updatedAt: '2026-09-09T04:02:00.000Z' },
+      },
+    ]),
+    (error) => error?.code === 'DAYLINE_INVALID_TASK_RANGE',
+  )
+
+  const canonical = database.readStore()
+  const rangeTask = canonical.tasks.find((task) => task.id === 'range-target')
+  assert.equal(canonical.revision, revisionBeforeRejectedBatch)
+  assert.equal(rangeTask.startDate, '2026-08-10')
+  assert.equal(rangeTask.dueDate, '2026-08-12')
+  assert.equal(canonical.tasks.find((task) => task.id === 'batch-peer').title, '원래 제목')
+  database.close()
+})
+
 test('increments the persistent revision when a read purges expired recovery data', (t) => {
   const paths = tempPaths(t)
   let clock = new Date(FIXED_NOW)
@@ -448,9 +501,11 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   let store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 2)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 3)
   assert.deepEqual(store.tasks.map((task) => task.id), ['v1-task'])
   assert.deepEqual(store.tasks[0].subTasks, [])
+  assert.equal(store.tasks[0].startDate, store.tasks[0].dueDate)
+  assert.equal(store.tasks[0].tagId, 'builtin-coral')
   assert.deepEqual(store.dailyNotes, [])
   upgraded.close()
 
@@ -463,7 +518,106 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
   const inspected = new DatabaseSync(paths.databasePath, { readOnly: true })
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM sync_outbox WHERE mutation_id = 'v1-outbox'`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 2`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 3`).get().count, 1)
   inspected.close()
+})
+
+test('upgrades a v2 database to v3 without demos and assigns deterministic ranges, tags, and positions', (t) => {
+  const paths = tempPaths(t)
+  const sqlite = new DatabaseSync(paths.databasePath)
+  sqlite.exec(`
+    PRAGMA foreign_keys = ON;
+    PRAGMA user_version = 2;
+    CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    CREATE TABLE profiles (
+      id TEXT PRIMARY KEY, server_user_id TEXT UNIQUE,
+      kind TEXT NOT NULL DEFAULT 'guest', display_name TEXT, email TEXT, avatar_url TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id), remote_id TEXT,
+      title TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL, due_time TEXT,
+      color TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, completed_at TEXT,
+      deleted_at TEXT, previous_completed INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      row_version INTEGER NOT NULL DEFAULT 1, server_version INTEGER,
+      sync_state TEXT NOT NULL DEFAULT 'local_only', last_synced_at TEXT,
+      UNIQUE(profile_id, remote_id)
+    ) STRICT;
+    CREATE TABLE sub_tasks (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, completed_at TEXT,
+      position INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      row_version INTEGER NOT NULL DEFAULT 1, server_version INTEGER,
+      sync_state TEXT NOT NULL DEFAULT 'local_only'
+    ) STRICT;
+    CREATE TABLE daily_notes (
+      id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      remote_id TEXT, content TEXT NOT NULL, note_date TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0, completed_at TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      row_version INTEGER NOT NULL DEFAULT 1, server_version INTEGER,
+      sync_state TEXT NOT NULL DEFAULT 'local_only', last_synced_at TEXT,
+      UNIQUE(profile_id, remote_id)
+    ) STRICT;
+    CREATE TABLE sync_outbox (
+      mutation_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('task', 'daily_note')),
+      entity_id TEXT NOT NULL, operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+      base_server_version INTEGER, payload_json TEXT, created_at TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
+      acknowledged_at TEXT, last_error TEXT
+    ) STRICT;
+    INSERT INTO profiles(id, kind, display_name, created_at, updated_at)
+      VALUES ('profile-v2', 'guest', '기존 v2 사용자', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    INSERT INTO app_meta(key, value) VALUES
+      ('local_profile_id', 'profile-v2'),
+      ('store_revision', '11'),
+      ('legacy_json_v1_migration', '{"status":"imported"}');
+    INSERT INTO tasks(id, profile_id, title, note, due_date, color, created_at, updated_at) VALUES
+      ('v2-later', 'profile-v2', '두 번째', '', '2026-09-12', 'blue', '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z'),
+      ('v2-first', 'profile-v2', '첫 번째', '', '2026-09-10', 'coral', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    INSERT INTO daily_notes(id, profile_id, content, note_date, created_at, updated_at) VALUES
+      ('note-b', 'profile-v2', '둘째', '2026-09-09', '2026-09-09T02:00:00.000Z', '2026-09-09T02:00:00.000Z'),
+      ('note-a', 'profile-v2', '첫째', '2026-09-09', '2026-09-09T01:00:00.000Z', '2026-09-09T01:00:00.000Z'),
+      ('note-other', 'profile-v2', '다른 날', '2026-09-10', '2026-09-09T03:00:00.000Z', '2026-09-09T03:00:00.000Z');
+  `)
+  sqlite.close()
+
+  const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const store = upgraded.readStore()
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 3)
+  assert.deepEqual(store.tasks.map(({ id, position }) => ({ id, position })), [
+    { id: 'v2-first', position: 0 },
+    { id: 'v2-later', position: 1 },
+  ])
+  assert.deepEqual(store.tasks.map(({ startDate, dueDate }) => ({ startDate, dueDate })), [
+    { startDate: '2026-09-10', dueDate: '2026-09-10' },
+    { startDate: '2026-09-12', dueDate: '2026-09-12' },
+  ])
+  assert.deepEqual(store.tasks.map((task) => task.tagId), ['builtin-coral', 'builtin-blue'])
+  assert.deepEqual(
+    store.dailyNotes.filter((note) => note.noteDate === '2026-09-09').map(({ id, position }) => ({ id, position })),
+    [{ id: 'note-a', position: 0 }, { id: 'note-b', position: 1 }],
+  )
+  assert.equal(store.dailyNotes.find((note) => note.id === 'note-other').position, 0)
+  assert.equal(store.taskTags.length, 9)
+  assert.deepEqual(store.settings, {
+    sidebarSplit: 50,
+    widgetSplit: 50,
+    fontScale: 1,
+    themeColor: '#255F4B',
+  })
+  assert.deepEqual(store.taskTemplates, [])
+  const firstRevision = store.revision
+  upgraded.close()
+
+  const reopened = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const reopenedStore = reopened.readStore()
+  assert.deepEqual(reopenedStore.tasks.map((task) => task.id), ['v2-first', 'v2-later'])
+  assert.deepEqual(reopenedStore.taskTemplates, [])
+  assert.equal(reopenedStore.revision, firstRevision)
+  reopened.close()
 })
 
 test('merges stale child-row mutations and derives parent completion after the whole batch', (t) => {
@@ -638,6 +792,123 @@ test('supports daily-note create, field-level patch merge, delete, and persisten
   reopened.close()
 })
 
+test('persists reordering, editable built-ins, custom tags, clamped settings, and template CRUD', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({
+    version: 1,
+    tasks: [
+      makeTask({ id: 'ordered-a', position: 0 }),
+      makeTask({ id: 'ordered-b', position: 1, color: 'blue', tagId: 'builtin-blue' }),
+    ],
+    dailyNotes: [
+      makeDailyNote({ id: 'note-a', position: 0 }),
+      makeDailyNote({ id: 'note-b', position: 1, createdAt: '2026-09-09T02:00:00.000Z' }),
+    ],
+  }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const timestamp = '2026-09-09T04:10:00.000Z'
+  const template = {
+    id: 'template-custom',
+    title: '집중 기간',
+    note: '템플릿 메모',
+    dueTime: '09:30',
+    tagId: 'custom-focus',
+    legacyColor: 'sage',
+    durationDays: 5,
+    subTaskTitles: ['준비', '실행'],
+    position: 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+  let store = database.applyStoreMutations([
+    { type: 'task:patch', id: 'ordered-a', changes: { position: 1, tagId: 'custom-focus' } },
+    { type: 'template:create', template },
+    {
+      type: 'tag:create',
+      tag: {
+        id: 'custom-focus',
+        name: '집중',
+        color: '#123456',
+        builtIn: false,
+        legacyColor: null,
+        position: 9,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+    },
+    { type: 'tag:patch', id: 'builtin-coral', changes: { name: '중요', updatedAt: timestamp } },
+    { type: 'tag:delete', id: 'builtin-blue' },
+    { type: 'task:patch', id: 'ordered-b', changes: { position: 0 } },
+    { type: 'daily-note:patch', id: 'note-a', changes: { position: 1 } },
+    { type: 'daily-note:patch', id: 'note-b', changes: { position: 0 } },
+    {
+      type: 'settings:patch',
+      changes: { sidebarSplit: 5, widgetSplit: 95, fontScale: 9, themeColor: '#abcdef' },
+    },
+  ])
+
+  assert.deepEqual(store.tasks.map(({ id, position }) => ({ id, position })), [
+    { id: 'ordered-b', position: 0 },
+    { id: 'ordered-a', position: 1 },
+  ])
+  assert.deepEqual(store.dailyNotes.map(({ id, position }) => ({ id, position })), [
+    { id: 'note-b', position: 0 },
+    { id: 'note-a', position: 1 },
+  ])
+  assert.equal(store.taskTags.find((tag) => tag.id === 'builtin-coral').name, '중요')
+  assert.ok(store.taskTags.some((tag) => tag.id === 'builtin-blue'))
+  assert.equal(store.taskTags.find((tag) => tag.id === 'custom-focus').builtIn, false)
+  assert.deepEqual(store.settings, {
+    sidebarSplit: 20,
+    widgetSplit: 80,
+    fontScale: 1.3,
+    themeColor: '#ABCDEF',
+  })
+  assert.deepEqual(store.taskTemplates, [template])
+
+  store = database.applyStoreMutations([
+    {
+      type: 'tag:patch',
+      id: 'custom-focus',
+      changes: { name: '깊은 집중', color: '#654321', updatedAt: '2026-09-09T04:11:00.000Z' },
+    },
+    {
+      type: 'template:patch',
+      id: template.id,
+      changes: {
+        title: '수정한 기간',
+        durationDays: 0,
+        subTaskTitles: ['한 단계'],
+        updatedAt: '2026-09-09T04:11:00.000Z',
+      },
+    },
+  ])
+  assert.equal(store.taskTags.find((tag) => tag.id === 'custom-focus').name, '깊은 집중')
+  assert.equal(store.taskTemplates[0].title, '수정한 기간')
+  assert.equal(store.taskTemplates[0].durationDays, 1)
+  assert.deepEqual(store.taskTemplates[0].subTaskTitles, ['한 단계'])
+  database.close()
+
+  const reopened = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  store = reopened.readStore()
+  assert.equal(store.taskTags.find((tag) => tag.id === 'builtin-coral').name, '중요')
+  assert.equal(store.taskTags.find((tag) => tag.id === 'custom-focus').color, '#654321')
+  assert.equal(store.taskTemplates[0].durationDays, 1)
+
+  store = reopened.applyStoreMutations([{ type: 'tag:delete', id: 'custom-focus' }])
+  assert.equal(store.taskTags.some((tag) => tag.id === 'custom-focus'), false)
+  assert.equal(store.tasks.find((task) => task.id === 'ordered-a').tagId, null)
+  assert.equal(store.taskTemplates[0].tagId, null)
+  assert.equal(store.tasks.some((task) => task.id === 'ordered-a'), true)
+  store = reopened.applyStoreMutations([{ type: 'template:delete', id: template.id }])
+  assert.deepEqual(store.taskTemplates, [])
+  reopened.close()
+
+  const afterDeleteReopen = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  assert.equal(afterDeleteReopen.readStore().tasks.find((task) => task.id === 'ordered-a').tagId, null)
+  afterDeleteReopen.close()
+})
+
 test('queues nested task and daily-note payloads for a future linked profile', (t) => {
   const paths = tempPaths(t)
   fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({
@@ -665,6 +936,38 @@ test('queues nested task and daily-note payloads for a future linked profile', (
     id: 'note-1',
     changes: { content: '동기화할 당일 메모' },
   }])
+  database.applyStoreMutations([
+    {
+      type: 'tag:create',
+      tag: {
+        id: 'sync-tag',
+        name: '동기화 태그',
+        color: '#123456',
+        builtIn: false,
+        legacyColor: null,
+        position: 9,
+        createdAt: '2026-09-09T04:20:00.000Z',
+        updatedAt: '2026-09-09T04:20:00.000Z',
+      },
+    },
+    {
+      type: 'template:create',
+      template: {
+        id: 'sync-template',
+        title: '동기화 템플릿',
+        note: '',
+        dueTime: null,
+        tagId: 'sync-tag',
+        legacyColor: 'coral',
+        durationDays: 2,
+        subTaskTitles: ['하위 일정'],
+        position: 0,
+        createdAt: '2026-09-09T04:20:00.000Z',
+        updatedAt: '2026-09-09T04:20:00.000Z',
+      },
+    },
+    { type: 'settings:patch', changes: { sidebarSplit: 42 } },
+  ])
   database.close()
 
   sqlite = new DatabaseSync(paths.databasePath, { readOnly: true })
@@ -678,8 +981,30 @@ test('queues nested task and daily-note payloads for a future linked profile', (
     WHERE entity_type = 'daily_note' AND entity_id = 'note-1'
     ORDER BY created_at DESC LIMIT 1
   `).get()
-  assert.equal(JSON.parse(taskOutbox.payload_json).subTasks[0].title, '동기화할 하위 일정')
+  const tagOutbox = sqlite.prepare(`
+    SELECT payload_json FROM sync_outbox
+    WHERE entity_type = 'task_tag' AND entity_id = 'sync-tag'
+    ORDER BY created_at DESC LIMIT 1
+  `).get()
+  const templateOutbox = sqlite.prepare(`
+    SELECT payload_json FROM sync_outbox
+    WHERE entity_type = 'task_template' AND entity_id = 'sync-template'
+    ORDER BY created_at DESC LIMIT 1
+  `).get()
+  const settingsOutbox = sqlite.prepare(`
+    SELECT payload_json FROM sync_outbox
+    WHERE entity_type = 'app_settings'
+    ORDER BY created_at DESC LIMIT 1
+  `).get()
+  const taskPayload = JSON.parse(taskOutbox.payload_json)
+  assert.equal(taskPayload.subTasks[0].title, '동기화할 하위 일정')
+  assert.equal(taskPayload.startDate, '2026-09-09')
+  assert.equal(taskPayload.tagId, 'builtin-coral')
+  assert.equal(taskPayload.position, 0)
   assert.equal(noteOutbox.operation, 'upsert')
   assert.equal(JSON.parse(noteOutbox.payload_json).content, '동기화할 당일 메모')
+  assert.equal(JSON.parse(tagOutbox.payload_json).name, '동기화 태그')
+  assert.deepEqual(JSON.parse(templateOutbox.payload_json).subTaskTitles, ['하위 일정'])
+  assert.equal(JSON.parse(settingsOutbox.payload_json).sidebarSplit, 42)
   sqlite.close()
 })
