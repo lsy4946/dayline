@@ -625,6 +625,12 @@ function createQaStore(today) {
         subTasks: [
           subTask('qa-child-a', '기존 세부 일정 A', 1),
           subTask('qa-child-b', '기존 세부 일정 B', 2),
+          subTask('qa-child-c', '기존 세부 일정 C', 3),
+          subTask('qa-child-d', '기존 세부 일정 D', 4),
+          subTask('qa-child-e', '기존 세부 일정 E', 5),
+          subTask('qa-child-f', '기존 세부 일정 F', 6),
+          subTask('qa-child-g', '기존 세부 일정 G', 7),
+          subTask('qa-child-h', '기존 세부 일정 H', 8),
         ],
       }),
       task('qa-task-b', 'QA 태그 일정', 'blue', 'builtin-blue', 1),
@@ -822,6 +828,96 @@ app.whenReady().then(async () => {
   assert.equal(sidebarStructure.splitValue, 50, 'The isolated main split seed must start at 50')
   assert.equal(sidebarStructure.independentScroll, true, 'Main panes must scroll independently')
   assert.equal(sidebarStructure.hasCustomScrollbar, true, 'Pane scrollbars must use the custom style')
+
+  qaStage = 'sidebar-subtask-scroll-and-collapse'
+  const expandedSubtaskLayout = await runIn(mainWindow, `(() => {
+    const taskList = document.querySelector('[data-qa="schedule-section"] .day-task-list')
+    const parent = taskList?.querySelector('.task-row[data-task-id="qa-task-a"]')
+    const subtaskList = parent?.querySelector('.sidebar-subtask-list')
+    const subtasks = [...(subtaskList?.querySelectorAll('[data-subtask-id]') ?? [])]
+    const disclosure = parent?.querySelector('.task-subtask-disclosure')
+    const parentBounds = parent?.getBoundingClientRect()
+    const lastBounds = subtasks.at(-1)?.getBoundingClientRect()
+    const disclosureBounds = disclosure?.getBoundingClientRect()
+    if (!taskList || !parent || !subtaskList || !disclosure || !parentBounds || !lastBounds || !disclosureBounds) return null
+    return {
+      count: subtasks.length,
+      disclosureText: disclosure.textContent.trim(),
+      expanded: disclosure.getAttribute('aria-expanded'),
+      hidden: subtaskList.hidden,
+      parentHeight: parentBounds.height,
+      parentContainsSubtasks: parent.scrollHeight <= parent.clientHeight + 1
+        && lastBounds.bottom <= parentBounds.bottom + 1,
+      disclosureVisible: disclosureBounds.left >= parentBounds.left
+        && disclosureBounds.right <= parentBounds.right,
+      listHasOverflow: taskList.scrollHeight > taskList.clientHeight + 1,
+      listScrollHeight: taskList.scrollHeight,
+    }
+  })()`)
+  assert.ok(expandedSubtaskLayout, 'Expanded sidebar subtask layout must be measurable')
+  assert.equal(expandedSubtaskLayout.count, 8, 'Every child must participate in the parent layout')
+  assert.equal(expandedSubtaskLayout.expanded, 'true', 'Subtasks must be expanded by default')
+  assert.equal(expandedSubtaskLayout.hidden, false)
+  assert.equal(expandedSubtaskLayout.disclosureText, '간략히')
+  assert.equal(expandedSubtaskLayout.disclosureVisible, true, 'Disclosure must remain inside the task card')
+  assert.equal(
+    expandedSubtaskLayout.parentContainsSubtasks,
+    true,
+    'Parent height must contain every expanded child instead of clipping them',
+  )
+  assert.equal(
+    expandedSubtaskLayout.listHasOverflow,
+    true,
+    'Expanded children must contribute to the schedule scrollbar overflow',
+  )
+
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-qa="schedule-section"] [data-task-id="qa-task-a"] .task-subtask-disclosure',
+    )?.click()`,
+  )
+  const collapsedSubtaskLayout = await waitForRenderer(mainWindow, `(() => {
+    const taskList = document.querySelector('[data-qa="schedule-section"] .day-task-list')
+    const parent = taskList?.querySelector('.task-row[data-task-id="qa-task-a"]')
+    const subtaskList = parent?.querySelector('.sidebar-subtask-list')
+    const disclosure = parent?.querySelector('.task-subtask-disclosure')
+    if (!taskList || !parent || !subtaskList || !disclosure) return null
+    if (disclosure.getAttribute('aria-expanded') !== 'false' || !subtaskList.hidden) return null
+    return {
+      disclosureText: disclosure.textContent.trim(),
+      parentHeight: parent.getBoundingClientRect().height,
+      listScrollHeight: taskList.scrollHeight,
+      modalOpen: Boolean(document.querySelector('.task-modal')),
+    }
+  })()`, 'collapsed sidebar subtasks')
+  assert.equal(collapsedSubtaskLayout.disclosureText, '상세히')
+  assert.ok(
+    collapsedSubtaskLayout.parentHeight < expandedSubtaskLayout.parentHeight,
+    'Collapsing details must reduce the parent card height',
+  )
+  assert.ok(
+    collapsedSubtaskLayout.listScrollHeight < expandedSubtaskLayout.listScrollHeight,
+    'Collapsed children must leave the schedule scroll flow',
+  )
+  assert.equal(collapsedSubtaskLayout.modalOpen, false, 'Disclosure must not open the task modal')
+
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-qa="schedule-section"] [data-task-id="qa-task-a"] .task-subtask-disclosure',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector(
+      '[data-qa="schedule-section"] [data-task-id="qa-task-a"] .task-subtask-disclosure',
+    )?.getAttribute('aria-expanded') === 'true'
+      && !document.querySelector(
+        '[data-qa="schedule-section"] [data-task-id="qa-task-a"] .sidebar-subtask-list',
+      )?.hidden`,
+    're-expanded sidebar subtasks',
+  )
 
   const railStructure = await runIn(mainWindow, `(() => {
     const rail = document.querySelector('.side-rail')

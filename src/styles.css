@@ -1009,6 +1009,7 @@ button:disabled {
 
 /* Parent tasks and their nested subtasks */
 .schedule-section .day-task-list { padding-bottom: 1px; }
+.schedule-section .day-task-list > .task-row { flex: 0 0 auto; }
 .schedule-section .empty-state { min-height: 88px; padding: 12px; }
 .schedule-section .empty-state .empty-orbit { width: 35px; height: 35px; margin-bottom: 7px; }
 .schedule-section .empty-state > span { display: none; }
@@ -1043,6 +1044,8 @@ button:disabled {
   border-top: 1px solid color-mix(in srgb, var(--task-color) 12%, #e7ebe7);
   border-left: 1px solid color-mix(in srgb, var(--task-color) 22%, #e1e6e2);
 }
+
+.sidebar-subtask-list[hidden] { display: none; }
 
 .sidebar-subtask {
   display: flex;
@@ -2992,7 +2995,41 @@ input[type="color"]:focus-visible {
   min-width: 0;
 }
 
-.task-row-head .task-row-main { min-width: 0; }
+.task-row-head .task-row-main {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.task-subtask-disclosure {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-self: center;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 49px;
+  height: 27px;
+  margin: 0 2px;
+  padding: 0 5px 0 7px;
+  border: 1px solid color-mix(in srgb, var(--task-color) 18%, #e1e6e2);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--task-soft) 72%, white);
+  color: color-mix(in srgb, var(--task-color) 68%, #66736c);
+  font-size: var(--font-8, 8px);
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.task-subtask-disclosure:hover,
+.task-subtask-disclosure:focus-visible {
+  border-color: color-mix(in srgb, var(--task-color) 38%, #d8dfd9);
+  background: var(--task-soft);
+  color: var(--task-color);
+}
+
+.task-subtask-disclosure svg { flex: 0 0 auto; }
+.task-row.is-completed .task-subtask-disclosure { opacity: 0.72; }
 .task-row-labels {
   display: flex;
   align-items: center;

@@ -3,8 +3,10 @@ import {
   CalendarDays,
   CalendarRange,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   CircleHelp,
   Clock3,
   CornerDownRight,
@@ -226,7 +228,10 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
         <strong>발표 준비</strong><span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>1 / 2 완료</small>
       </div>
     ),
-    tips: ['퀵 노트와 일정 사이 구분선을 드래그하거나 키보드로 움직여 두 영역의 높이를 조절할 수 있어요.'],
+    tips: [
+      '하위 태스크가 있는 일정은 오른쪽의 간략히/상세히 버튼으로 목록을 접거나 펼칠 수 있어요.',
+      '퀵 노트와 일정 사이 구분선을 드래그하거나 키보드로 움직여 두 영역의 높이를 조절할 수 있어요.',
+    ],
   },
   {
     target: 'templates',
@@ -861,6 +866,8 @@ function TaskRow({
   onDropTask,
   compact = false,
   showSubTasks = false,
+  subTasksExpanded = true,
+  onToggleSubTasksVisibility,
   reorderable = false,
 }: {
   task: Task
@@ -872,13 +879,17 @@ function TaskRow({
   onDropTask?: (draggedId: string, targetId: string) => void
   compact?: boolean
   showSubTasks?: boolean
+  subTasksExpanded?: boolean
+  onToggleSubTasksVisibility?: () => void
   reorderable?: boolean
 }) {
   const tag = tags.find((item) => item.id === task.tagId)
+  const hasVisibleSubTasks = showSubTasks && task.subTasks.length > 0
+  const subTaskListId = `task-subtasks-${task.id}`
   return (
     <article
       data-task-id={task.id}
-      className={`task-row color-${task.color} ${task.completed ? 'is-completed' : ''} ${compact ? 'is-compact' : ''}`}
+      className={`task-row color-${task.color} ${task.completed ? 'is-completed' : ''} ${compact ? 'is-compact' : ''} ${hasVisibleSubTasks && !subTasksExpanded ? 'is-subtasks-collapsed' : ''}`}
       style={taskVisualStyle(task, tags)}
       onDragOver={(event) => {
         if (!reorderable || !event.dataTransfer.types.includes('application/x-dayline-task')) return
@@ -918,7 +929,7 @@ function TaskRow({
             <span className="task-row-labels">
               {tag && <span className="task-tag-label">{tag.name}</span>}
               {task.startDate !== task.dueDate && <span>{taskRangeLabel(task)}</span>}
-              {showSubTasks && task.subTasks.length > 0 && (
+              {hasVisibleSubTasks && (
                 <span className="task-subtask-summary">
                   {task.subTasks.filter((subTask) => subTask.completed).length}/{task.subTasks.length} 완료
                 </span>
@@ -929,12 +940,38 @@ function TaskRow({
             <span className="task-due-time"><Clock3 size={12} /> {task.dueTime}</span>
           )}
         </button>
+        {hasVisibleSubTasks && onToggleSubTasksVisibility && (
+          <button
+            type="button"
+            className="task-subtask-disclosure"
+            aria-controls={subTaskListId}
+            aria-expanded={subTasksExpanded}
+            aria-label={`${task.title} 하위 태스크 ${subTasksExpanded ? '간략히 보기' : '상세히 보기'}`}
+            title={subTasksExpanded ? '간략히 보기' : '상세히 보기'}
+            onClick={(event) => {
+              event.stopPropagation()
+              onToggleSubTasksVisibility()
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+            }}
+          >
+            <span>{subTasksExpanded ? '간략히' : '상세히'}</span>
+            {subTasksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+        )}
         {reorderable && onMove && (
           <ReorderHandle kind="task" id={task.id} label={task.title} onMove={onMove} />
         )}
       </div>
-      {showSubTasks && task.subTasks.length > 0 && (
-        <div className="sidebar-subtask-list" aria-label={`${task.title}의 세부 할 일`}>
+      {hasVisibleSubTasks && (
+        <div
+          id={subTaskListId}
+          className="sidebar-subtask-list"
+          aria-label={`${task.title}의 세부 할 일`}
+          hidden={!subTasksExpanded}
+        >
           {task.subTasks.map((subTask) => (
             <div
               key={subTask.id}
@@ -2245,6 +2282,7 @@ function MainView(props: SharedViewProps) {
   const [noteCreateRequest, setNoteCreateRequest] = useState(0)
   const [railPanel, setRailPanel] = useState<RailPanel>(null)
   const [helpOpen, setHelpOpen] = useState(false)
+  const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => new Set())
   const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(() => new Set())
   const [selectedRange, setSelectedRange] = useState(() => ({ startDate: today, endDate: today }))
   const [sidebarSplit, setSidebarSplit] = useState(settings.sidebarSplit)
@@ -2294,6 +2332,14 @@ function MainView(props: SharedViewProps) {
       return next.size === current.size ? current : next
     })
   }, [taskTags])
+
+  useEffect(() => {
+    const collapsibleIds = new Set(tasks.filter((task) => task.subTasks.length > 0).map((task) => task.id))
+    setCollapsedTaskIds((current) => {
+      const next = new Set([...current].filter((id) => collapsibleIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [tasks])
 
   useEffect(() => {
     const finishRange = () => { rangeAnchorRef.current = null }
@@ -2451,6 +2497,14 @@ function MainView(props: SharedViewProps) {
   }
   const moveTask = (id: string, direction: ReorderDirection) => {
     onTaskReorder(movedIds(selectedTasks.map((task) => task.id), id, direction))
+  }
+  const toggleTaskSubTasksVisibility = (id: string) => {
+    setCollapsedTaskIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
   const reorderCalendarTasksByDrop = (draggedId: string, targetId: string) => {
     onTaskReorder(droppedIds(calendarTasks.map((task) => task.id), draggedId, targetId))
@@ -2905,6 +2959,8 @@ function MainView(props: SharedViewProps) {
                     onMove={moveTask}
                     onDropTask={reorderTasksByDrop}
                     showSubTasks
+                    subTasksExpanded={!collapsedTaskIds.has(task.id)}
+                    onToggleSubTasksVisibility={() => toggleTaskSubTasksVisibility(task.id)}
                     reorderable
                   />
                 ))
