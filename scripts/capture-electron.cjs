@@ -837,7 +837,10 @@ app.whenReady().then(async () => {
       expanded: button.getAttribute('aria-expanded'),
     })
     const railBounds = rail.getBoundingClientRect()
-    const recoveryBounds = bottomActions[0]?.getBoundingClientRect()
+    const recoveryBounds = bottomActions.find((button) => button.dataset.railAction === 'recovery')
+      ?.getBoundingClientRect()
+    const helpBounds = bottomActions.find((button) => button.dataset.railAction === 'help')
+      ?.getBoundingClientRect()
     const lastPrimaryBounds = primaryActions.at(-1)?.getBoundingClientRect()
     return {
       primary: primaryActions.map(describe),
@@ -853,6 +856,12 @@ app.whenReady().then(async () => {
         && recoveryBounds.left >= railBounds.left
         && recoveryBounds.right <= railBounds.right
         && recoveryBounds.bottom <= railBounds.bottom,
+      helpBelowRecovery: Boolean(recoveryBounds && helpBounds)
+        && helpBounds.top >= recoveryBounds.bottom,
+      helpInsideRail: Boolean(helpBounds)
+        && helpBounds.left >= railBounds.left
+        && helpBounds.right <= railBounds.right
+        && helpBounds.bottom <= railBounds.bottom,
     }
   })()`)
   assert.ok(railStructure, 'The redesigned rail must render primary and bottom action groups')
@@ -868,12 +877,15 @@ app.whenReady().then(async () => {
   )
   assert.deepEqual(
     railStructure.bottom,
-    [{ action: 'recovery', id: 'rail-action-recovery', controls: 'recovery-panel', expanded: 'false' }],
-    'Recent deletion must be the sole bottom rail action',
+    [
+      { action: 'recovery', id: 'rail-action-recovery', controls: 'recovery-panel', expanded: 'false' },
+      { action: 'help', id: 'rail-action-help', controls: 'main-help-tour', expanded: 'false' },
+    ],
+    'Recent deletion and help must keep their accessible bottom-rail order',
   )
   assert.deepEqual(
     railStructure.allActions,
-    ['templates', 'filters', 'tags', 'appearance', 'recovery'],
+    ['templates', 'filters', 'tags', 'appearance', 'recovery', 'help'],
   )
   assert.equal(railStructure.hasCalendarAction, false, 'The redundant calendar rail action must be removed')
   assert.equal(railStructure.hasOfflineDot, false, 'The legacy local-status dot must be removed')
@@ -881,6 +893,8 @@ app.whenReady().then(async () => {
   assert.equal(railStructure.recoveryOutsidePrimary, true, 'Recovery must sit outside the primary navigation')
   assert.equal(railStructure.recoveryBelowPrimary, true, 'Recovery must remain below the primary action stack')
   assert.equal(railStructure.recoveryInsideRail, true, 'Recovery must remain inside the rail bounds')
+  assert.equal(railStructure.helpBelowRecovery, true, 'Help must be the bottom-most rail action')
+  assert.equal(railStructure.helpInsideRail, true, 'Help must remain inside the rail bounds')
   assert.equal(
     await runIn(
       mainWindow,
@@ -3094,11 +3108,14 @@ app.whenReady().then(async () => {
       const recoveryRailAction = document.querySelector(
         '.side-rail > .rail-bottom [data-rail-action="recovery"]',
       )
+      const helpRailAction = document.querySelector(
+        '.side-rail > .rail-bottom [data-rail-action="help"]',
+      )
       if (
         !panel || !body || !quick || !schedule || !add || !headerAdd
         || !workspace || !splitter || !root || !shell || !noteList || !taskList
         || !calendarGrid || calendarCells.length !== 42 || !rail
-        || primaryRailActions.length !== 4 || !recoveryRailAction
+        || primaryRailActions.length !== 4 || !recoveryRailAction || !helpRailAction
       ) return null
       const rect = (element) => {
         const bounds = element.getBoundingClientRect()
@@ -3208,7 +3225,7 @@ app.whenReady().then(async () => {
         },
         railGeometry: (() => {
           const railBounds = rect(rail)
-          const actions = [...primaryRailActions, recoveryRailAction].map((button) => ({
+          const actions = [...primaryRailActions, recoveryRailAction, helpRailAction].map((button) => ({
             action: button.dataset.railAction,
             bounds: rect(button),
           }))
@@ -3229,8 +3246,10 @@ app.whenReady().then(async () => {
               || orderedByTop[index - 1].bounds.bottom <= action.bounds.top + 1),
             recoveryBelowPrimary: recoveryRailAction.getBoundingClientRect().top
               >= primaryRailActions.at(-1).getBoundingClientRect().bottom,
-            recoveryNearBottom: railBounds.bottom
-              - recoveryRailAction.getBoundingClientRect().bottom <= 32,
+            helpBelowRecovery: helpRailAction.getBoundingClientRect().top
+              >= recoveryRailAction.getBoundingClientRect().bottom,
+            helpNearBottom: railBounds.bottom
+              - helpRailAction.getBoundingClientRect().bottom <= 32,
           }
         })(),
       }
@@ -3277,7 +3296,7 @@ app.whenReady().then(async () => {
   )
   assert.deepEqual(
     minimumLayout.railGeometry.actions.map((item) => item.action),
-    ['templates', 'filters', 'tags', 'appearance', 'recovery'],
+    ['templates', 'filters', 'tags', 'appearance', 'recovery', 'help'],
     'Minimum-size rail must preserve its semantic action order',
   )
   assert.equal(
@@ -3287,7 +3306,8 @@ app.whenReady().then(async () => {
   )
   assert.equal(minimumLayout.railGeometry.noOverlap, true, 'Minimum-size rail actions must not overlap')
   assert.equal(minimumLayout.railGeometry.recoveryBelowPrimary, true)
-  assert.equal(minimumLayout.railGeometry.recoveryNearBottom, true, 'Recovery must remain anchored near rail bottom')
+  assert.equal(minimumLayout.railGeometry.helpBelowRecovery, true, 'Help must remain below recovery')
+  assert.equal(minimumLayout.railGeometry.helpNearBottom, true, 'Help must remain anchored at rail bottom')
   console.log(
     `Minimum calendar overlay: lanes=${minimumLayout.calendarGeometry.maxLanes}, `
       + `segments=${minimumLayout.calendarGeometry.segmentCount}, `

@@ -5,6 +5,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  CircleHelp,
   Clock3,
   CornerDownRight,
   FileText,
@@ -83,6 +84,7 @@ import {
   type TaskEditChanges,
 } from './domain/taskDraft'
 import { loadStore, saveStore, subscribeToStore } from './lib/storage'
+import { HelpTour, type HelpTourStep } from './components/HelpTour'
 import type {
   AppSettings,
   DailyNote,
@@ -128,6 +130,203 @@ interface TemplateDraft {
   durationDays: number
   subTaskTitles: string[]
 }
+
+const MAIN_HELP_STEPS: HelpTourStep[] = [
+  {
+    eyebrow: 'DAYLINE 0.2 둘러보기',
+    title: '일정과 메모를 한 화면에서 정리해요',
+    description: '기간 일정, 세부 할 일, 퀵 노트와 반복 일정까지 새로 확장된 Dayline을 실제 화면과 함께 안내할게요. 약 3분이면 충분합니다.',
+    example: (
+      <div className="help-example-welcome">
+        <BrandMark compact />
+        <div><strong>SQLite로 이 PC에 안전하게 저장</strong><span>인터넷 없이도 일정·메모·설정이 자동 보관돼요.</span></div>
+      </div>
+    ),
+    tips: ['도움말은 왼쪽 메뉴 맨 아래의 ? 버튼에서 언제든 다시 열 수 있어요.'],
+  },
+  {
+    target: 'month-navigation',
+    eyebrow: '날짜 이동',
+    title: '원하는 연도와 달로 바로 이동하세요',
+    description: '화살표와 오늘 버튼뿐 아니라 연도·월 선택 메뉴로 먼 날짜까지 빠르게 이동할 수 있어요.',
+    example: (
+      <div className="help-example-actions">
+        <span>‹</span><strong>오늘</strong><span>›</span><small>2027년 · 3월</small>
+      </div>
+    ),
+    tips: ['일요일과 대한민국 공휴일은 빨간색, 토요일은 파란색으로 표시돼요.'],
+  },
+  {
+    target: 'calendar',
+    eyebrow: '기간 선택과 월간 일정',
+    title: '날짜를 드래그해 일정 기간을 잡아보세요',
+    description: '캘린더 빈 영역을 누른 채 끌면 시작일과 마감일이 선택됩니다. 여러 날 일정은 주를 넘어도 이어지는 하나의 바로 표시돼요.',
+    example: (
+      <div className="help-example-range">
+        <span>12</span><i /><i /><i /><strong>15</strong>
+        <small>3박 4일 출장 준비</small>
+      </div>
+    ),
+    tips: ['날짜를 한 번 클릭하면 그날을 선택하고, 더블클릭하면 바로 새 일정을 만들어요.'],
+  },
+  {
+    target: 'calendar-order',
+    eyebrow: '캘린더 일정 순서',
+    title: '캘린더 안에서 일정 바의 순서를 바꿔요',
+    description: '캘린더에 표시된 일정 바 오른쪽 손잡이를 끌어 다른 일정 위에 놓으면 월간 화면의 위아래 표시 순서가 바뀝니다.',
+    example: (
+      <div className="help-example-reorder"><GripVertical size={15} /><div><strong>오후 보고서 검토</strong><span>캘린더에서 드래그 또는 Alt + ↑/↓</span></div><b>⋮⋮</b></div>
+    ),
+    tips: ['손잡이에 키보드 포커스를 둔 뒤 Alt + ↑/↓를 눌러도 순서를 옮길 수 있어요.'],
+  },
+  {
+    target: 'create-task',
+    eyebrow: '일정 만들기와 상세',
+    title: '큰 일정을 세부 할 일로 나눠 관리해요',
+    description: '제목과 기간은 필수이고 시간·메모·태그·세부 할 일은 선택이에요. 세부 할 일을 모두 끝내면 상위 일정도 자동으로 비활성화됩니다.',
+    example: (
+      <div className="help-example-subtasks">
+        <strong>발표 준비</strong><span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>1 / 2 완료</small>
+      </div>
+    ),
+    tips: ['기존 일정의 내용과 상태 변경은 상세 화면에서 변경 저장을 눌러야 반영돼요.'],
+  },
+  {
+    target: 'search',
+    eyebrow: '검색',
+    title: '제목과 메모에서 빠르게 찾아요',
+    description: '돋보기를 눌러 입력하면 월간 캘린더와 선택한 날짜 목록이 동시에 필터링됩니다. 태그 필터와도 함께 사용할 수 있어요.',
+    example: <div className="help-example-search"><Search size={14} /><strong>프로젝트</strong><span>제목 + 메모 검색</span></div>,
+  },
+  {
+    target: 'widget-launch',
+    eyebrow: '데스크톱 위젯',
+    title: '일정과 퀵 노트를 작은 창에 띄워두세요',
+    description: '위젯에서도 주간 탐색, 빠른 일정 추가, 세부 할 일과 퀵 노트 관리가 가능하며 메인 창과 실시간으로 동기화됩니다.',
+    example: <div className="help-example-widget"><MonitorUp size={18} /><div><strong>일정 + 퀵 노트 분할 화면</strong><span>항상 위 · 잠금 · 크기 복원</span></div></div>,
+    tips: ['위젯 상단의 ? 버튼에서는 작은 창 전용 조작법을 볼 수 있어요.'],
+  },
+  {
+    target: 'quick-notes',
+    eyebrow: '퀵 노트',
+    title: '형식 없는 메모는 퀵 노트에 바로 적어요',
+    description: '제목이나 마감일이 필요 없는 생각은 선택한 날짜의 퀵 노트로 남기세요. 클릭해 수정하고 우클릭해 완료 상태를 바꿀 수 있어요.',
+    example: (
+      <div className="help-example-note"><FileText size={15} /><div><strong>회의 전에 질문 목록 확인</strong><span>Ctrl + Enter로 저장</span></div></div>
+    ),
+    tips: ['퀵 노트는 오른쪽 패널과 위젯에만 보이고 월간 캘린더에는 표시되지 않아요.'],
+  },
+  {
+    target: 'schedule-list',
+    eyebrow: '선택 날짜의 일정',
+    title: '오른쪽 아래에서 일정과 세부 할 일을 확인해요',
+    description: '선택한 날짜의 일정을 모아 보고, 일정을 클릭해 상세 내용을 열거나 세부 할 일을 바로 완료할 수 있어요.',
+    example: (
+      <div className="help-example-subtasks">
+        <strong>발표 준비</strong><span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>1 / 2 완료</small>
+      </div>
+    ),
+    tips: ['퀵 노트와 일정 사이 구분선을 드래그하거나 키보드로 움직여 두 영역의 높이를 조절할 수 있어요.'],
+  },
+  {
+    target: 'templates',
+    eyebrow: '반복 일정',
+    title: '자주 쓰는 일정은 템플릿으로 저장하세요',
+    description: '기간·시간·태그·메모·세부 할 일이 포함된 반복 일정을 만들고, 선택 날짜에 추가하거나 캘린더 날짜로 끌어 놓을 수 있어요.',
+    example: (
+      <div className="help-example-template"><Repeat2 size={16} /><div><strong>주간 회고 · 1일</strong><span>캘린더로 드래그해 생성</span></div><b>추가</b></div>
+    ),
+  },
+  {
+    target: 'filters',
+    eyebrow: '태그 필터',
+    title: '보고 싶은 태그만 골라보세요',
+    description: '여러 태그를 동시에 선택하면 하나라도 해당하는 일정을 캘린더와 오른쪽 목록에서 함께 보여줍니다.',
+    example: (
+      <div className="help-example-tags"><span className="tag-coral">업무 ✓</span><span className="tag-blue">개인 ✓</span><span>태그 없음</span></div>
+    ),
+    tips: ['필터가 적용되면 왼쪽 아이콘에 선택한 태그 개수가 표시돼요.'],
+  },
+  {
+    target: 'tags',
+    eyebrow: '태그 설정',
+    title: '태그의 이름과 색상을 내 방식대로',
+    description: '9개의 기본 태그 이름과 색상을 바꾸거나 사용자 태그를 새로 만들어 일정에 재사용할 수 있어요.',
+    example: (
+      <div className="help-example-tag-editor"><i style={{ background: '#d66787' }} /><strong>집중 업무</strong><span>#D66787</span></div>
+    ),
+    tips: ['사용자 태그는 삭제할 수 있고, 기본 태그는 이름과 색상만 변경할 수 있어요.'],
+  },
+  {
+    target: 'appearance',
+    eyebrow: '화면 설정',
+    title: '글자 크기와 테마 색상을 조절해요',
+    description: '화면 배율을 85%부터 130%까지 바꾸고 앱 전체 강조색을 선택할 수 있습니다. 설정은 메인 창과 위젯에 함께 적용돼요.',
+    example: (
+      <div className="help-example-appearance"><span>A</span><i><b /></i><strong>110%</strong><em style={{ background: '#4f86c6' }} /></div>
+    ),
+  },
+  {
+    target: 'recovery',
+    eyebrow: '최근 삭제',
+    title: '삭제한 일정은 30일 동안 복구할 수 있어요',
+    description: '원래 기간과 활성·비활성 상태, 세부 할 일을 함께 보존하고 그대로 되돌립니다.',
+    example: <div className="help-example-recovery"><History size={16} /><div><strong>분기 계획 정리</strong><span>비활성 · 28일 남음</span></div><b>복구</b></div>,
+    tips: ['우클릭 상태 변경 직후에는 화면 아래 알림에서 즉시 되돌릴 수도 있어요.'],
+  },
+  {
+    target: 'help-menu',
+    eyebrow: '자동 저장',
+    title: '준비가 끝났어요',
+    description: '모든 변경은 내장 SQLite에 자동 저장되고, 기존 JSON 일정이 있다면 첫 실행 때 백업 후 이전됩니다. 이제 원하는 날짜에서 시작해 보세요.',
+    example: <div className="help-example-ready"><Check size={18} /><div><strong>오프라인 저장 중</strong><span>도움말은 왼쪽 맨 아래에서 다시 열 수 있어요.</span></div></div>,
+  },
+]
+
+const WIDGET_HELP_STEPS: HelpTourStep[] = [
+  {
+    eyebrow: '위젯 둘러보기',
+    title: '일정과 퀵 노트를 바탕화면 가까이에',
+    description: '작은 위젯에서도 날짜 선택, 일정·세부 할 일, 퀵 노트를 함께 관리할 수 있어요.',
+    example: <div className="help-example-widget"><BrandMark compact /><div><strong>Dayline 0.2 위젯</strong><span>메인 캘린더와 실시간 동기화</span></div></div>,
+  },
+  {
+    target: 'widget-controls',
+    eyebrow: '창 조작',
+    title: '위치와 표시 방식을 원하는 대로',
+    description: '상단 손잡이로 이동하고 자물쇠로 위치·크기를 잠그세요. 핀은 항상 위, 모서리 아이콘은 기본 크기 복원입니다.',
+    tips: ['캘린더 아이콘은 메인 창을 열고 ×는 위젯만 닫아요.'],
+  },
+  {
+    target: 'widget-week',
+    eyebrow: '주간 탐색',
+    title: '이번 주 일정을 날짜별로 넘겨봐요',
+    description: '요일을 누르면 그날의 일정과 퀵 노트가 함께 바뀝니다. 점이 있는 날짜에는 아직 활성 일정이 있어요.',
+    example: <div className="help-example-week"><span>월<strong>10</strong></span><span className="is-selected">화<strong>11</strong><i>•</i></span><span>수<strong>12</strong></span></div>,
+  },
+  {
+    target: 'widget-schedule',
+    eyebrow: '일정',
+    title: '제목만 입력해 빠르게 추가하세요',
+    description: '입력칸에서 Enter를 누르면 선택 날짜에 일정이 생깁니다. 목록에서는 상세 보기, 우클릭 상태 변경과 세부 할 일 완료가 가능해요.',
+    example: <div className="help-example-quick"><Plus size={14} /><strong>회의 자료 정리</strong><span>Enter</span></div>,
+  },
+  {
+    target: 'widget-splitter',
+    eyebrow: '분할 영역',
+    title: '일정과 퀵 노트의 높이를 조절해요',
+    description: '가운데 구분선을 드래그하거나 방향키로 이동하세요. 더블클릭하면 두 영역이 다시 같은 높이가 됩니다.',
+    example: <div className="help-example-split"><span>일정</span><i><b /></i><span>퀵 노트</span></div>,
+  },
+  {
+    target: 'widget-notes',
+    eyebrow: '퀵 노트',
+    title: '작은 메모도 놓치지 마세요',
+    description: '+를 눌러 형식 없이 기록하고, 클릭해 수정하거나 우클릭해 완료 표시할 수 있어요.',
+    example: <div className="help-example-note"><FileText size={15} /><div><strong>퇴근 전에 전화하기</strong><span>선택 날짜에 바로 저장</span></div></div>,
+    tips: ['시간·기간·태그가 필요하면 일정으로 추가하세요.'],
+  },
+]
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value))
@@ -393,6 +592,7 @@ function IconButton({
   expanded,
   railAction,
   autoFocus = false,
+  dataHelpId,
 }: {
   label: string
   children: ReactNode
@@ -403,8 +603,9 @@ function IconButton({
   id?: string
   controls?: string
   expanded?: boolean
-  railAction?: 'templates' | 'filters' | 'tags' | 'appearance' | 'recovery'
+  railAction?: 'templates' | 'filters' | 'tags' | 'appearance' | 'recovery' | 'help'
   autoFocus?: boolean
+  dataHelpId?: string
 }) {
   return (
     <button
@@ -415,6 +616,7 @@ function IconButton({
       aria-controls={controls}
       aria-expanded={expanded}
       data-rail-action={railAction}
+      data-help-id={dataHelpId}
       title={label}
       onClick={onClick}
       disabled={disabled}
@@ -502,6 +704,7 @@ function SplitHandle({
     <div
       className="split-handle"
       data-qa={qa}
+      data-help-id={qa === 'widget-splitter' ? 'widget-splitter' : 'sidebar-splitter'}
       role="separator"
       tabIndex={0}
       aria-orientation="horizontal"
@@ -785,6 +988,7 @@ function EmptyState({ onAdd, compact = false }: { onAdd?: () => void; compact?: 
 }
 
 function DailyNotesSection({
+  helpId,
   selectedDate,
   notes,
   composerOpen,
@@ -799,6 +1003,7 @@ function DailyNotesSection({
   reorderable = true,
   showHeaderAdd = false,
 }: {
+  helpId?: string
   selectedDate: string
   notes: DailyNote[]
   composerOpen: boolean
@@ -864,7 +1069,7 @@ function DailyNotesSection({
   }
 
   return (
-    <section className="daily-notes-section" data-qa="quick-note-section" aria-labelledby="daily-notes-title">
+    <section className="daily-notes-section" data-help-id={helpId} data-qa="quick-note-section" aria-labelledby="daily-notes-title">
       <div className="panel-section-heading">
         <div>
           <span className="eyebrow">QUICK NOTE</span>
@@ -2039,6 +2244,7 @@ function MainView(props: SharedViewProps) {
   const [noteComposerOpen, setNoteComposerOpen] = useState(false)
   const [noteCreateRequest, setNoteCreateRequest] = useState(0)
   const [railPanel, setRailPanel] = useState<RailPanel>(null)
+  const [helpOpen, setHelpOpen] = useState(false)
   const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(() => new Set())
   const [selectedRange, setSelectedRange] = useState(() => ({ startDate: today, endDate: today }))
   const [sidebarSplit, setSidebarSplit] = useState(settings.sidebarSplit)
@@ -2288,6 +2494,7 @@ function MainView(props: SharedViewProps) {
   }
 
   return (
+    <>
     <div className="main-shell">
       <aside className="side-rail">
         <div className="rail-brand"><BrandMark /></div>
@@ -2298,6 +2505,7 @@ function MainView(props: SharedViewProps) {
             controls="rail-panel-templates"
             expanded={railPanel === 'templates'}
             railAction="templates"
+            dataHelpId="templates"
             active={railPanel === 'templates'}
             onClick={() => toggleRailPanel('templates')}
           >
@@ -2309,6 +2517,7 @@ function MainView(props: SharedViewProps) {
             controls="rail-panel-filters"
             expanded={railPanel === 'filters'}
             railAction="filters"
+            dataHelpId="filters"
             active={railPanel === 'filters' || selectedTagIds.size > 0}
             onClick={() => toggleRailPanel('filters')}
           >
@@ -2321,6 +2530,7 @@ function MainView(props: SharedViewProps) {
             controls="rail-panel-tags"
             expanded={railPanel === 'tags'}
             railAction="tags"
+            dataHelpId="tags"
             active={railPanel === 'tags'}
             onClick={() => toggleRailPanel('tags')}
           >
@@ -2332,6 +2542,7 @@ function MainView(props: SharedViewProps) {
             controls="rail-panel-appearance"
             expanded={railPanel === 'appearance'}
             railAction="appearance"
+            dataHelpId="appearance"
             active={railPanel === 'appearance'}
             onClick={() => toggleRailPanel('appearance')}
           >
@@ -2345,6 +2556,7 @@ function MainView(props: SharedViewProps) {
             controls="recovery-panel"
             expanded={recoveryOpen}
             railAction="recovery"
+            dataHelpId="recovery"
             active={recoveryOpen}
             onClick={() => {
               setRailPanel(null)
@@ -2353,6 +2565,22 @@ function MainView(props: SharedViewProps) {
           >
             <History size={20} />
             {deleted.length > 0 && <span className="nav-badge">{deleted.length}</span>}
+          </IconButton>
+          <IconButton
+            id="rail-action-help"
+            label="도움말 보기"
+            controls="main-help-tour"
+            expanded={helpOpen}
+            railAction="help"
+            active={helpOpen}
+            dataHelpId="help-menu"
+            onClick={() => {
+              setRailPanel(null)
+              setRecoveryOpen(false)
+              setHelpOpen(true)
+            }}
+          >
+            <CircleHelp size={20} />
           </IconButton>
         </div>
       </aside>
@@ -2409,7 +2637,7 @@ function MainView(props: SharedViewProps) {
             </div>
           </div>
           <div className="header-actions">
-            <div className={`search-control ${searchOpen ? 'is-open' : ''}`}>
+            <div className={`search-control ${searchOpen ? 'is-open' : ''}`} data-help-id="search">
               <Search size={17} />
               {searchOpen && (
                 <input
@@ -2434,6 +2662,7 @@ function MainView(props: SharedViewProps) {
             <button
               type="button"
               className="widget-launch"
+              data-help-id="widget-launch"
               onClick={() => void window.dayline?.openWidget()}
               disabled={!window.dayline}
               title={window.dayline ? '별도 위젯 창 열기' : '설치된 데스크톱 앱에서 사용할 수 있어요'}
@@ -2443,6 +2672,7 @@ function MainView(props: SharedViewProps) {
             <button
               type="button"
               className="primary-button header-add"
+              data-help-id="create-task"
               onClick={() => openCreate()}
               aria-label={`${formatCompactDate(selectedRange.startDate)}부터 ${formatCompactDate(selectedRange.endDate)}까지 새 일정`}
             >
@@ -2460,9 +2690,9 @@ function MainView(props: SharedViewProps) {
           </div>
         )}
 
-        <section className="calendar-card" aria-label={`${formatMonthTitle(month)} 일정 캘린더`}>
+        <section className="calendar-card" data-help-id="calendar" aria-label={`${formatMonthTitle(month)} 일정 캘린더`}>
           <div className="calendar-toolbar">
-            <div className="month-navigation">
+            <div className="month-navigation" data-help-id="month-navigation">
               <IconButton label="이전 달" onClick={() => navigateMonth(-1)}>
                 <ChevronLeft size={18} />
               </IconButton>
@@ -2583,7 +2813,7 @@ function MainView(props: SharedViewProps) {
                 </div>
               )
             })}
-            <div className="calendar-task-layout" data-qa="calendar-task-layout" role="group" aria-label="캘린더 일정 순서">
+            <div className="calendar-task-layout" data-help-id="calendar-order" data-qa="calendar-task-layout" role="group" aria-label="캘린더 일정 순서">
               {calendarTaskLayout.segments.map((segment) => {
                 const task = calendarTaskById.get(segment.taskId)
                 if (!task) return null
@@ -2629,6 +2859,7 @@ function MainView(props: SharedViewProps) {
           style={{ gridTemplateRows: `minmax(0, ${sidebarSplit}fr) 9px minmax(0, ${100 - sidebarSplit}fr)` }}
         >
           <DailyNotesSection
+            helpId="quick-notes"
             selectedDate={selectedDate}
             notes={selectedDailyNotes}
             composerOpen={noteComposerOpen}
@@ -2651,7 +2882,7 @@ function MainView(props: SharedViewProps) {
             }}
           />
 
-          <section className="schedule-section" data-qa="schedule-section" aria-labelledby="schedule-section-title">
+          <section className="schedule-section" data-help-id="schedule-list" data-qa="schedule-section" aria-labelledby="schedule-section-title">
             <div className="panel-section-heading schedule-heading">
               <div>
                 <span className="eyebrow">SCHEDULE</span>
@@ -2708,6 +2939,8 @@ function MainView(props: SharedViewProps) {
       />
       <RecoveryPanel open={recoveryOpen} tasks={deleted} onClose={closeRecovery} onRestore={onTaskRestore} />
     </div>
+    <HelpTour id="main-help-tour" open={helpOpen} steps={MAIN_HELP_STEPS} onClose={() => setHelpOpen(false)} />
+    </>
   )
 }
 
@@ -2739,6 +2972,7 @@ function WidgetView(props: SharedViewProps) {
   const [noteComposerOpen, setNoteComposerOpen] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [helpOpen, setHelpOpen] = useState(false)
   const active = useMemo(() => visibleTasks(tasks), [tasks])
   const selectedTasks = useMemo(
     () => sortTasks(active.filter((task) => taskOccursOnDate(task, selectedDate))),
@@ -2792,7 +3026,7 @@ function WidgetView(props: SharedViewProps) {
           <BrandMark compact />
           <span>Dayline</span>
         </div>
-        <div className="widget-controls">
+        <div className="widget-controls" data-help-id="widget-controls">
           <IconButton
             label={widgetState.locked ? '위치와 크기 잠금 해제' : '위치와 크기 잠금'}
             active={widgetState.locked}
@@ -2819,6 +3053,9 @@ function WidgetView(props: SharedViewProps) {
           <IconButton label="메인 캘린더 열기" onClick={() => void window.dayline?.openMainWindow()}>
             <CalendarDays size={14} />
           </IconButton>
+          <IconButton label="위젯 도움말 보기" active={helpOpen} onClick={() => setHelpOpen(true)}>
+            <CircleHelp size={14} />
+          </IconButton>
           <IconButton label="위젯 닫기" onClick={() => void window.dayline?.closeWidget()}>
             <X size={15} />
           </IconButton>
@@ -2834,7 +3071,7 @@ function WidgetView(props: SharedViewProps) {
           {selectedDate !== today && <button type="button" onClick={() => setSelectedDate(today)}>오늘</button>}
         </section>
 
-        <div className="widget-week" role="group" aria-label="이번 주 날짜 선택">
+        <div className="widget-week" data-help-id="widget-week" role="group" aria-label="이번 주 날짜 선택">
           {week.map((day) => {
             const weekday = fromDateKey(day.key).getDay()
             const holiday = getKoreanHoliday(day.key)
@@ -2871,7 +3108,7 @@ function WidgetView(props: SharedViewProps) {
           data-split-container
           style={{ gridTemplateRows: `minmax(0, ${widgetSplit}fr) 9px minmax(0, ${100 - widgetSplit}fr)` }}
         >
-          <section className="widget-schedule-pane" data-qa="widget-schedule" aria-labelledby="widget-schedule-title">
+          <section className="widget-schedule-pane" data-help-id="widget-schedule" data-qa="widget-schedule" aria-labelledby="widget-schedule-title">
             <div className="panel-section-heading widget-pane-heading">
               <div><span className="eyebrow">SCHEDULE</span><strong id="widget-schedule-title">일정</strong></div>
               <span>{selectedTasks.length}</span>
@@ -2921,6 +3158,7 @@ function WidgetView(props: SharedViewProps) {
 
           <div className="widget-quick-note-pane" data-qa="widget-quick-notes">
             <DailyNotesSection
+              helpId="widget-notes"
               selectedDate={selectedDate}
               notes={selectedDailyNotes}
               composerOpen={noteComposerOpen}
@@ -2957,6 +3195,7 @@ function WidgetView(props: SharedViewProps) {
         }}
         onDelete={onTaskDelete}
       />
+      <HelpTour id="widget-help-tour" open={helpOpen} steps={WIDGET_HELP_STEPS} onClose={() => setHelpOpen(false)} />
     </>
   )
 }
