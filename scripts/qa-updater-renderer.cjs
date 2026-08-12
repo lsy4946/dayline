@@ -61,6 +61,11 @@ app.whenReady().then(async () => {
 
   await runIn(window, `document.querySelector('[data-qa="update-menu-button"]')?.click()`)
   await waitFor(window, `document.querySelector('[data-qa="update-status"]')?.classList.contains('status-idle')`, 'idle panel')
+  assert.equal(
+    await runIn(window, `Boolean(document.querySelector('[data-qa="update-installed-release-history"]'))`),
+    false,
+    'An installation without an update baseline must not show an empty history card',
+  )
   await runIn(window, `document.querySelector('[data-qa="update-check"]')?.click()`)
   qaStage = 'manual-checking'
   await waitFor(window, `document.querySelector('[data-qa="update-status"]')?.classList.contains('status-checking')`, 'manual checking state')
@@ -235,6 +240,47 @@ app.whenReady().then(async () => {
   await runIn(latestWindow, `document.querySelector('[data-qa="update-menu-button"]')?.click()`)
   await waitFor(latestWindow, `document.querySelector('[data-qa="update-status"]')?.classList.contains('status-not-available')`, 'latest panel result')
   assert.equal(await runIn(latestWindow, `Boolean(document.querySelector('[data-qa="update-available-dialog"]'))`), false)
+  const installedHistory = await waitFor(latestWindow, `(() => {
+    const card = document.querySelector('[data-qa="update-installed-release-history"]')
+    const notes = card?.querySelector('[data-qa="update-installed-release-notes"]')
+    if (!card || !notes) return null
+    return {
+      state: card.dataset.historyState,
+      title: card.querySelector('[data-qa="update-installed-release-title"]')?.textContent?.trim(),
+      range: card.querySelector('[data-qa="update-installed-release-range"]')?.textContent?.trim(),
+      headings: [...notes.querySelectorAll('h4')].map((heading) => heading.textContent?.trim()),
+      hasAvailableCard: Boolean(document.querySelector('[data-qa="update-available-release"]')),
+      hasUpdateBadge: Boolean(document.querySelector('[data-qa="update-menu-button"] .update-nav-badge')),
+      hasDownloadAction: Boolean(document.querySelector('[data-qa="update-download"]')),
+      hasInstallAction: Boolean(document.querySelector('[data-qa="update-install"]')),
+    }
+  })()`, 'installed release history while already latest')
+  assert.deepEqual(installedHistory, {
+    state: 'ready',
+    title: 'Dayline v0.3.2',
+    range: 'v0.3.0 이후 v0.3.2까지의 변경 사항',
+    headings: ['v0.3.1', 'v0.3.2'],
+    hasAvailableCard: false,
+    hasUpdateBadge: false,
+    hasDownloadAction: false,
+    hasInstallAction: false,
+  }, 'Installed release history must stay visible at latest without acting like a new update')
+  await runIn(latestWindow, `window.dayline.__updateQa.unavailableHistory()`)
+  const unavailableHistory = await waitFor(latestWindow, `(() => {
+    const card = document.querySelector('[data-qa="update-installed-release-history"]')
+    const fallback = card?.querySelector('[data-qa="update-installed-release-unavailable"]')
+    if (card?.dataset.historyState !== 'notes-unavailable' || !fallback) return null
+    return {
+      hasNotes: Boolean(card.querySelector('[data-qa="update-installed-release-notes"]')),
+      copy: fallback.textContent?.trim(),
+      hasUpdatePrompt: Boolean(document.querySelector('[data-qa="update-available-dialog"]')),
+    }
+  })()`, 'unavailable installed release history fallback')
+  assert.deepEqual(unavailableHistory, {
+    hasNotes: false,
+    copy: '설치된 버전 범위의 릴리스 노트를 불러오지 못했어요. 인터넷 연결 후 업데이트 확인을 다시 눌러 주세요.',
+    hasUpdatePrompt: false,
+  })
 
   qaStage = 'startup-available'
   const startupWindow = new BrowserWindow({

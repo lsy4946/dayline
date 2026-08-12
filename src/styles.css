@@ -3048,6 +3048,25 @@ input[type="color"]:focus-visible {
 }
 
 .update-release-card h3 { margin: 5px 0 9px; color: #4a5650; font-size: var(--font-12, 12px); }
+.update-installed-history-card {
+  border-color: color-mix(in srgb, var(--green) 24%, var(--line));
+  background: color-mix(in srgb, var(--green) 4%, white);
+}
+
+.update-history-range {
+  margin: -3px 0 10px;
+  color: #7e8a84;
+  font-size: var(--font-9, 9px);
+  line-height: 1.5;
+}
+
+.update-history-unavailable {
+  margin: 0;
+  color: #7b8780;
+  font-size: var(--font-10, 10px);
+  line-height: 1.6;
+}
+
 .update-release-notes {
   display: grid;
   gap: 10px;

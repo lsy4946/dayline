@@ -6,6 +6,14 @@ const baseState = (status, patch = {}) => ({
   availableVersion: null,
   releaseName: null,
   releaseNotes: null,
+  installedReleaseHistory: {
+    state: 'no-baseline',
+    fromVersion: null,
+    toVersion: '0.3.0',
+    releaseName: null,
+    releaseNotes: null,
+    recordedAt: null,
+  },
   progress: null,
   error: null,
   unsupportedReason: null,
@@ -56,6 +64,21 @@ const releasePatch = {
 긴 릴리스에서도 스크롤을 확인하기 위한 문단 07입니다.
 
 긴 릴리스에서도 스크롤을 확인하기 위한 문단 08입니다.`,
+}
+
+const installedReleaseHistory = {
+  state: 'ready',
+  fromVersion: '0.3.0',
+  toVersion: '0.3.2',
+  releaseName: 'Dayline v0.3.2',
+  releaseNotes: releasePatch.releaseNotes,
+  recordedAt: '2026-08-12T03:30:00.000Z',
+}
+
+const unavailableInstalledReleaseHistory = {
+  ...installedReleaseHistory,
+  state: 'notes-unavailable',
+  releaseNotes: null,
 }
 
 const initialMode = new URLSearchParams(location.search).get('updateQa')
@@ -123,6 +146,9 @@ contextBridge.exposeInMainWorld('dayline', {
     getCalls: () => ({ ...calls }),
     getState: () => ({ ...current }),
     available: () => emit(baseState('available', releasePatch)),
-    notAvailable: () => emit(baseState('not-available')),
+    notAvailable: () => emit(baseState('not-available', { installedReleaseHistory })),
+    unavailableHistory: () => emit(baseState('not-available', {
+      installedReleaseHistory: unavailableInstalledReleaseHistory,
+    })),
   },
 })

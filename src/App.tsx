@@ -139,6 +139,14 @@ const UNSUPPORTED_UPDATE_STATE: UpdateState = {
   availableVersion: null,
   releaseName: null,
   releaseNotes: null,
+  installedReleaseHistory: {
+    state: 'no-baseline',
+    fromVersion: null,
+    toVersion: '',
+    releaseName: null,
+    releaseNotes: null,
+    recordedAt: null,
+  },
   progress: null,
   error: null,
   unsupportedReason: 'development',
@@ -2180,15 +2188,23 @@ function unsupportedUpdateCopy(state: UpdateState) {
   }
 }
 
-function ReleaseNotesContent({ notes }: { notes: string }) {
+function ReleaseNotesContent({
+  notes,
+  dataQa = 'update-release-notes',
+  ariaLabel = '릴리스 노트 상세',
+}: {
+  notes: string
+  dataQa?: string
+  ariaLabel?: string
+}) {
   const blocks = useMemo(() => parseReleaseNotes(notes), [notes])
   if (blocks.length === 0) return null
   return (
     <div
       className="update-release-notes"
-      data-qa="update-release-notes"
+      data-qa={dataQa}
       role="region"
-      aria-label="릴리스 노트 상세"
+      aria-label={ariaLabel}
       tabIndex={0}
     >
       {blocks.map((block, index) => {
@@ -2209,6 +2225,42 @@ function ReleaseNotesContent({ notes }: { notes: string }) {
         return <p key={key} data-release-note-kind="paragraph">{block.text}</p>
       })}
     </div>
+  )
+}
+
+function InstalledReleaseHistoryCard({ history }: { history: UpdateState['installedReleaseHistory'] }) {
+  if (history.state === 'no-baseline') return null
+
+  const releaseTitle = history.releaseName?.trim()
+    || `${versionLabel(history.toVersion)} 업데이트 변경 사항`
+  const fromVersion = versionLabel(history.fromVersion)
+  const toVersion = versionLabel(history.toVersion)
+  const notes = history.releaseNotes?.trim()
+
+  return (
+    <section
+      className="update-release-card update-installed-history-card"
+      data-qa="update-installed-release-history"
+      data-history-state={history.state}
+      aria-labelledby="update-installed-release-title"
+    >
+      <span className="eyebrow">INSTALLED UPDATE</span>
+      <h3 id="update-installed-release-title" data-qa="update-installed-release-title">{releaseTitle}</h3>
+      <p className="update-history-range" data-qa="update-installed-release-range">
+        {history.fromVersion ? `${fromVersion} 이후 ${toVersion}까지의 변경 사항` : `${toVersion} 변경 사항`}
+      </p>
+      {history.state === 'ready' && notes ? (
+        <ReleaseNotesContent
+          notes={notes}
+          dataQa="update-installed-release-notes"
+          ariaLabel="설치된 업데이트의 릴리스 노트 상세"
+        />
+      ) : (
+        <p className="update-history-unavailable" data-qa="update-installed-release-unavailable">
+          설치된 버전 범위의 릴리스 노트를 불러오지 못했어요. 인터넷 연결 후 업데이트 확인을 다시 눌러 주세요.
+        </p>
+      )}
+    </section>
   )
 }
 
@@ -2298,13 +2350,19 @@ function UpdatePanel({
           </div>
         )}
 
-        {(releaseTitle || state.releaseNotes) && (
-          <section className="update-release-card" aria-labelledby="update-release-title">
+        {(releaseTitle || state.releaseNotes) && state.availableVersion && (
+          <section
+            className="update-release-card"
+            data-qa="update-available-release"
+            aria-labelledby="update-release-title"
+          >
             <span className="eyebrow">RELEASE NOTES</span>
             <h3 id="update-release-title">{releaseTitle || `${versionLabel(state.availableVersion)} 변경 사항`}</h3>
             {state.releaseNotes && <ReleaseNotesContent notes={state.releaseNotes} />}
           </section>
         )}
+
+        <InstalledReleaseHistoryCard history={state.installedReleaseHistory} />
 
         <div className="update-actions">
           <button

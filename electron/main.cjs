@@ -7,6 +7,7 @@ const { createDaylineDatabase } = require('./database.cjs')
 const {
   configureAutoUpdater,
   createUpdaterController,
+  fetchGitHubReleaseHistory,
   getUpdateSupport,
 } = require('./updater.cjs')
 
@@ -279,6 +280,7 @@ function recoverFromFailedUpdateInstall() {
 }
 
 function createAppUpdater() {
+  const currentVersion = app.getVersion()
   const support = getUpdateSupport({
     isPackaged: app.isPackaged,
     platform: process.platform,
@@ -288,13 +290,45 @@ function createAppUpdater() {
     isQa: isDatabaseQa,
     fileExists: fs.existsSync,
   })
+  let initialInstalledReleaseHistory = null
+  if (taskDatabase) {
+    try {
+      initialInstalledReleaseHistory = taskDatabase.reconcileUpdateHistory(
+        currentVersion,
+        new Date().toISOString(),
+      ) || taskDatabase.readInstalledReleaseHistory()
+    } catch {
+      initialInstalledReleaseHistory = null
+    }
+  }
   return createUpdaterController({
     adapter: configureAutoUpdater(autoUpdater),
-    currentVersion: app.getVersion(),
+    currentVersion,
     support,
     broadcast: broadcastUpdateState,
     beforeInstall: prepareForUpdateInstall,
     afterInstallFailure: recoverFromFailedUpdateInstall,
+    initialInstalledReleaseHistory,
+    recordUpdateConsent: (fromVersion, targetVersion, recordedAt, releaseName, releaseNotes) => {
+      if (databaseWritesBlocked || !taskDatabase) throw new Error('Dayline database is unavailable while updating')
+      return taskDatabase.recordUpdateConsent(
+        fromVersion,
+        targetVersion,
+        recordedAt,
+        releaseName,
+        releaseNotes,
+      )
+    },
+    fetchReleaseHistory: ({ fromVersion, toVersion }) => fetchGitHubReleaseHistory({
+      owner: 'lsy4946',
+      repo: 'dayline',
+      fromVersion,
+      toVersion,
+    }),
+    saveInstalledReleaseNotes: (history) => {
+      if (databaseWritesBlocked || !taskDatabase) throw new Error('Dayline database is unavailable while updating')
+      return taskDatabase.saveInstalledReleaseNotes(history)
+    },
   })
 }
 

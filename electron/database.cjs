@@ -6,6 +6,11 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
 const SCHEMA_VERSION = 4
 const STORE_VERSION = 1
+const UPDATE_CONSENT_META_KEY = 'pending_update_consent_v1'
+const INSTALLED_RELEASE_HISTORY_META_KEY = 'installed_release_history_v1'
+const MAX_UPDATE_VERSION_LENGTH = 128
+const MAX_UPDATE_RELEASE_NAME_LENGTH = 200
+const MAX_UPDATE_RELEASE_NOTES_LENGTH = 128 * 1024
 const TASK_COLORS = new Set(['coral', 'violet', 'sage', 'blue', 'amber'])
 const DEFAULT_APP_SETTINGS = Object.freeze({
   sidebarSplit: 50,
@@ -98,6 +103,171 @@ const TEMPLATE_COLUMN_BY_FIELD = {
   subTaskTitles: 'sub_task_titles_json',
   position: 'position',
   updatedAt: 'updated_at',
+}
+
+function parseUpdateVersion(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > MAX_UPDATE_VERSION_LENGTH) return null
+  const normalized = trimmed.replace(/^v/i, '')
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(normalized)
+  if (!match) return null
+  const prerelease = match[4] ? match[4].split('.') : null
+  if (prerelease?.some((part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) return null
+  return {
+    normalized,
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    prerelease,
+  }
+}
+
+function compareUpdateVersions(left, right) {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] < right.core[index]) return -1
+    if (left.core[index] > right.core[index]) return 1
+  }
+  if (left.prerelease === null && right.prerelease !== null) return 1
+  if (left.prerelease !== null && right.prerelease === null) return -1
+  if (left.prerelease !== null && right.prerelease !== null) {
+    const length = Math.max(left.prerelease.length, right.prerelease.length)
+    for (let index = 0; index < length; index += 1) {
+      const leftPart = left.prerelease[index]
+      const rightPart = right.prerelease[index]
+      if (leftPart === undefined) return -1
+      if (rightPart === undefined) return 1
+      if (leftPart === rightPart) continue
+      const leftNumeric = /^\d+$/.test(leftPart)
+      const rightNumeric = /^\d+$/.test(rightPart)
+      if (leftNumeric && rightNumeric) {
+        const leftNumber = BigInt(leftPart)
+        const rightNumber = BigInt(rightPart)
+        if (leftNumber < rightNumber) return -1
+        if (leftNumber > rightNumber) return 1
+      } else if (leftNumeric !== rightNumeric) {
+        return leftNumeric ? -1 : 1
+      } else {
+        return leftPart < rightPart ? -1 : 1
+      }
+    }
+  }
+  return 0
+}
+
+function requireUpdateVersion(value, fieldName) {
+  const version = parseUpdateVersion(value)
+  if (!version) throw new TypeError(`${fieldName} must be a valid semantic version.`)
+  return version
+}
+
+function requireUpdateTimestamp(value, fieldName, { nullable = false } = {}) {
+  if (nullable && value == null) return null
+  if (typeof value !== 'string' || !value || value.length > 64) {
+    throw new TypeError(`${fieldName} must be a valid timestamp.`)
+  }
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.getTime())) throw new TypeError(`${fieldName} must be a valid timestamp.`)
+  return parsed.toISOString()
+}
+
+function normalizeUpdateReleaseName(value) {
+  if (value == null) return null
+  if (typeof value !== 'string') throw new TypeError('releaseName must be a string or null.')
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) return null
+  if (normalized.length > MAX_UPDATE_RELEASE_NAME_LENGTH) {
+    throw new RangeError('releaseName is too long.')
+  }
+  return normalized
+}
+
+function requireUpdateReleaseNotes(value) {
+  if (typeof value !== 'string') throw new TypeError('releaseNotes must be a string.')
+  const normalized = value.trim()
+  if (!normalized) throw new TypeError('releaseNotes must not be empty.')
+  if (normalized.length > MAX_UPDATE_RELEASE_NOTES_LENGTH) {
+    throw new RangeError('releaseNotes is too long.')
+  }
+  return normalized
+}
+
+function normalizeOptionalUpdateReleaseNotes(value) {
+  return value == null ? null : requireUpdateReleaseNotes(value)
+}
+
+function parseMetaJson(rawValue) {
+  if (typeof rawValue !== 'string') return null
+  try {
+    const value = JSON.parse(rawValue)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+function sanitizeStoredUpdateConsent(rawValue) {
+  const value = parseMetaJson(rawValue)
+  if (!value || value.schema !== 1) return null
+  try {
+    const fromVersion = requireUpdateVersion(value.fromVersion, 'fromVersion')
+    const targetVersion = requireUpdateVersion(value.targetVersion, 'targetVersion')
+    if (compareUpdateVersions(fromVersion, targetVersion) >= 0) return null
+    return {
+      fromVersion: fromVersion.normalized,
+      targetVersion: targetVersion.normalized,
+      recordedAt: requireUpdateTimestamp(value.recordedAt, 'recordedAt'),
+      releaseName: normalizeUpdateReleaseName(value.releaseName),
+      releaseNotes: normalizeOptionalUpdateReleaseNotes(value.releaseNotes),
+    }
+  } catch {
+    return null
+  }
+}
+
+function sanitizeStoredInstalledReleaseHistory(rawValue) {
+  const value = parseMetaJson(rawValue)
+  if (!value || value.schema !== 1 || !['ready', 'notes-unavailable'].includes(value.state)) return null
+  try {
+    const targetVersion = requireUpdateVersion(value.targetVersion, 'targetVersion')
+    const toVersion = requireUpdateVersion(value.toVersion, 'toVersion')
+    if (compareUpdateVersions(targetVersion, toVersion) > 0) return null
+    const fromVersion = value.fromVersion == null
+      ? null
+      : requireUpdateVersion(value.fromVersion, 'fromVersion')
+    if (fromVersion && compareUpdateVersions(fromVersion, toVersion) >= 0) return null
+
+    const recordedAt = requireUpdateTimestamp(value.recordedAt, 'recordedAt', { nullable: true })
+    const completedAt = requireUpdateTimestamp(value.completedAt, 'completedAt', { nullable: true })
+    if (fromVersion === null) {
+      if (recordedAt !== null || completedAt !== null) return null
+      if (targetVersion.normalized !== toVersion.normalized) return null
+      if (value.state !== 'ready') return null
+    } else if (recordedAt === null || completedAt === null) {
+      return null
+    }
+
+    const releaseName = normalizeUpdateReleaseName(value.releaseName)
+    const releaseNotes = value.state === 'ready'
+      ? requireUpdateReleaseNotes(value.releaseNotes)
+      : null
+    if (value.state === 'notes-unavailable' && value.releaseNotes != null) return null
+    return {
+      state: value.state,
+      fromVersion: fromVersion?.normalized ?? null,
+      targetVersion: targetVersion.normalized,
+      toVersion: toVersion.normalized,
+      releaseName,
+      releaseNotes,
+      recordedAt,
+      completedAt,
+      verified: value.verified === true,
+    }
+  } catch {
+    return null
+  }
+}
+
+function storedUpdateValue(value) {
+  return JSON.stringify({ schema: 1, ...value })
 }
 
 function localDateKey(date = new Date()) {
@@ -1134,6 +1304,159 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
     return readStoreRevision()
   }
 
+  function recordUpdateConsent(
+    fromVersionValue,
+    targetVersionValue,
+    recordedAtValue,
+    releaseNameValue = null,
+    releaseNotesValue = null,
+  ) {
+    const fromVersion = requireUpdateVersion(fromVersionValue, 'fromVersion')
+    const targetVersion = requireUpdateVersion(targetVersionValue, 'targetVersion')
+    if (compareUpdateVersions(fromVersion, targetVersion) >= 0) {
+      throw new RangeError('targetVersion must be newer than fromVersion.')
+    }
+    const consent = {
+      fromVersion: fromVersion.normalized,
+      targetVersion: targetVersion.normalized,
+      recordedAt: requireUpdateTimestamp(recordedAtValue, 'recordedAt'),
+      releaseName: normalizeUpdateReleaseName(releaseNameValue),
+      releaseNotes: normalizeOptionalUpdateReleaseNotes(releaseNotesValue),
+    }
+    inTransaction(database, () => {
+      const existing = sanitizeStoredUpdateConsent(getMeta.get(UPDATE_CONSENT_META_KEY)?.value)
+      if (
+        existing
+        && existing.fromVersion === consent.fromVersion
+        && existing.targetVersion === consent.targetVersion
+      ) {
+        consent.recordedAt = existing.recordedAt
+        consent.releaseName = consent.releaseName || existing.releaseName
+        consent.releaseNotes = consent.releaseNotes || existing.releaseNotes
+      }
+      setMeta.run(UPDATE_CONSENT_META_KEY, storedUpdateValue(consent))
+    })
+    return { ...consent }
+  }
+
+  function reconcileUpdateHistory(currentVersionValue, completedAtValue) {
+    const currentVersion = requireUpdateVersion(currentVersionValue, 'currentVersion')
+    const completedAt = requireUpdateTimestamp(completedAtValue, 'completedAt')
+    let installedHistory = null
+    inTransaction(database, () => {
+      const rawConsent = getMeta.get(UPDATE_CONSENT_META_KEY)?.value
+      const consent = sanitizeStoredUpdateConsent(rawConsent)
+      if (!consent) {
+        if (rawConsent != null) deleteMeta.run(UPDATE_CONSENT_META_KEY)
+        return
+      }
+      const fromVersion = requireUpdateVersion(consent.fromVersion, 'fromVersion')
+      const targetVersion = requireUpdateVersion(consent.targetVersion, 'targetVersion')
+      if (
+        compareUpdateVersions(targetVersion, currentVersion) > 0
+        || compareUpdateVersions(fromVersion, currentVersion) >= 0
+      ) return
+
+      installedHistory = {
+        state: compareUpdateVersions(targetVersion, currentVersion) === 0 && consent.releaseNotes
+          ? 'ready'
+          : 'notes-unavailable',
+        fromVersion: fromVersion.normalized,
+        targetVersion: targetVersion.normalized,
+        toVersion: currentVersion.normalized,
+        releaseName: compareUpdateVersions(targetVersion, currentVersion) === 0 && consent.releaseNotes
+          ? consent.releaseName
+          : null,
+        releaseNotes: compareUpdateVersions(targetVersion, currentVersion) === 0
+          ? consent.releaseNotes
+          : null,
+        recordedAt: consent.recordedAt,
+        completedAt,
+        verified: false,
+      }
+      setMeta.run(INSTALLED_RELEASE_HISTORY_META_KEY, storedUpdateValue(installedHistory))
+      deleteMeta.run(UPDATE_CONSENT_META_KEY)
+    })
+    return installedHistory ? { ...installedHistory } : null
+  }
+
+  function saveInstalledReleaseNotes(historyValue) {
+    if (!historyValue || typeof historyValue !== 'object' || Array.isArray(historyValue)) {
+      throw new TypeError('history must be an installed release history object.')
+    }
+    if (historyValue.state != null && historyValue.state !== 'ready') {
+      throw new TypeError('history.state must be ready.')
+    }
+    const fromVersion = historyValue.fromVersion == null
+      ? null
+      : requireUpdateVersion(historyValue.fromVersion, 'fromVersion')
+    const targetVersion = requireUpdateVersion(historyValue.targetVersion, 'targetVersion')
+    const toVersion = requireUpdateVersion(historyValue.toVersion, 'toVersion')
+    if (compareUpdateVersions(targetVersion, toVersion) > 0) {
+      throw new RangeError('targetVersion must not be newer than toVersion.')
+    }
+    if (fromVersion && compareUpdateVersions(fromVersion, toVersion) >= 0) {
+      throw new RangeError('fromVersion must be older than toVersion.')
+    }
+    const releaseName = normalizeUpdateReleaseName(historyValue.releaseName)
+    const releaseNotes = requireUpdateReleaseNotes(historyValue.releaseNotes)
+    const recordedAt = requireUpdateTimestamp(historyValue.recordedAt, 'recordedAt', { nullable: true })
+
+    let savedHistory = null
+    inTransaction(database, () => {
+      const existing = sanitizeStoredInstalledReleaseHistory(
+        getMeta.get(INSTALLED_RELEASE_HISTORY_META_KEY)?.value,
+      )
+      if (existing) {
+        const normalizedFromVersion = fromVersion?.normalized ?? null
+        if (
+          normalizedFromVersion !== existing.fromVersion
+          || toVersion.normalized !== existing.toVersion
+          || recordedAt !== existing.recordedAt
+        ) {
+          throw new Error('Release notes do not match the installed update history.')
+        }
+        savedHistory = {
+          ...existing,
+          state: 'ready',
+          releaseName,
+          releaseNotes,
+          verified: true,
+        }
+      } else {
+        const completedAt = requireUpdateTimestamp(historyValue.completedAt, 'completedAt', { nullable: true })
+        if (
+          fromVersion !== null
+          || targetVersion.normalized !== toVersion.normalized
+          || recordedAt !== null
+          || completedAt !== null
+        ) {
+          throw new Error('A release-note baseline must describe only the current version.')
+        }
+        savedHistory = {
+          state: 'ready',
+          fromVersion: null,
+          targetVersion: targetVersion.normalized,
+          toVersion: toVersion.normalized,
+          releaseName,
+          releaseNotes,
+          recordedAt: null,
+          completedAt: null,
+          verified: true,
+        }
+      }
+      setMeta.run(INSTALLED_RELEASE_HISTORY_META_KEY, storedUpdateValue(savedHistory))
+    })
+    return { ...savedHistory }
+  }
+
+  function readInstalledReleaseHistory() {
+    const history = sanitizeStoredInstalledReleaseHistory(
+      getMeta.get(INSTALLED_RELEASE_HISTORY_META_KEY)?.value,
+    )
+    return history ? { ...history } : null
+  }
+
   function readMigrationWarning() {
     return sanitizeMigrationWarning(getMeta.get('legacy_json_v1_error')?.value)
   }
@@ -1817,6 +2140,10 @@ function createDaylineDatabase({ databasePath, legacyJsonPath, now = () => new D
   return {
     readStore,
     applyStoreMutations,
+    recordUpdateConsent,
+    reconcileUpdateHistory,
+    saveInstalledReleaseNotes,
+    readInstalledReleaseHistory,
     // Runtime compatibility for already-built QA helpers; renderer types use only the new API.
     applyMutations: applyStoreMutations,
     readDiagnostics,

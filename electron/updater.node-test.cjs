@@ -6,10 +6,21 @@ const path = require('node:path')
 const {
   configureAutoUpdater,
   createUpdaterController,
+  fetchGitHubReleaseHistory,
   getUpdateSupport,
+  normalizeInstalledReleaseHistory,
   normalizeReleaseNotes,
   sanitizeUpdaterError,
 } = require('./updater.cjs')
+
+const NO_INSTALLED_HISTORY_1_2_3 = {
+  state: 'no-baseline',
+  fromVersion: null,
+  toVersion: '1.2.3',
+  releaseName: null,
+  releaseNotes: null,
+  recordedAt: null,
+}
 
 class FakeUpdater extends EventEmitter {
   constructor() {
@@ -56,6 +67,12 @@ function createSupportedController(options = {}) {
     support: { supported: true, reason: null },
     broadcast: (state) => states.push(state),
     beforeInstall: options.beforeInstall,
+    afterInstallFailure: options.afterInstallFailure,
+    initialInstalledReleaseHistory: options.initialInstalledReleaseHistory,
+    recordUpdateConsent: options.recordUpdateConsent,
+    fetchReleaseHistory: options.fetchReleaseHistory,
+    saveInstalledReleaseNotes: options.saveInstalledReleaseNotes,
+    now: options.now,
   })
   return { adapter, controller, states }
 }
@@ -132,6 +149,10 @@ test('unsupported controller never invokes provider operations', async () => {
     availableVersion: null,
     releaseName: null,
     releaseNotes: null,
+    installedReleaseHistory: {
+      ...NO_INSTALLED_HISTORY_1_2_3,
+      toVersion: '1.0.0',
+    },
     progress: null,
     error: null,
     unsupportedReason: 'portable',
@@ -192,6 +213,7 @@ test('publishes update availability, safe release metadata, download progress, a
     availableVersion: '1.3.0',
     releaseName: 'Dayline 1.3.0',
     releaseNotes: '새 기능 추가',
+    installedReleaseHistory: NO_INSTALLED_HISTORY_1_2_3,
     progress: null,
     error: null,
     unsupportedReason: null,
@@ -265,6 +287,39 @@ test('a failed explicit download never starts the installer', async () => {
   assert.equal(state.error, 'UPDATE_DOWNLOAD_FAILED')
 })
 
+test('persists the current and target versions before starting an explicit download', async () => {
+  const sequence = []
+  const recordedAt = new Date('2026-08-13T01:00:00.000Z')
+  const { adapter, controller } = createSupportedController({
+    now: () => recordedAt,
+    recordUpdateConsent: (...args) => sequence.push(['record', ...args]),
+  })
+  adapter.emit('update-available', { version: '1.3.0' })
+  adapter.downloadImplementation = async () => {
+    sequence.push(['download'])
+    throw new Error('stop after ordering assertion')
+  }
+
+  await controller.download()
+  assert.deepEqual(sequence, [
+    ['record', '1.2.3', '1.3.0', recordedAt.toISOString(), null, null],
+    ['download'],
+  ])
+})
+
+test('does not contact the download provider when update consent persistence fails', async () => {
+  const { adapter, controller } = createSupportedController({
+    recordUpdateConsent: () => { throw new Error('database unavailable') },
+  })
+  adapter.emit('update-available', { version: '1.3.0' })
+
+  const state = await controller.download()
+  assert.equal(adapter.downloadCalls, 0)
+  assert.equal(adapter.installCalls, 0)
+  assert.equal(state.status, 'available')
+  assert.equal(state.error, 'UPDATE_DOWNLOAD_FAILED')
+})
+
 test('a late update-downloaded event consumes explicit consent and installs exactly once', async () => {
   const { adapter, controller } = createSupportedController()
   adapter.emit('update-available', { version: '1.3.0' })
@@ -322,6 +377,7 @@ test('a stale downloaded event cannot replace a newer available version without 
     availableVersion: '1.2.0',
     releaseName: null,
     releaseNotes: 'new release',
+    installedReleaseHistory: NO_INSTALLED_HISTORY_1_2_3,
     progress: null,
     error: null,
     unsupportedReason: null,
@@ -339,6 +395,47 @@ test('a downloaded event without explicit download consent remains ready for man
   assert.equal(adapter.installCalls, 0)
   assert.equal(controller.getState().status, 'downloaded')
   assert.equal(controller.getState().canInstall, true)
+})
+
+test('manual install persists fallback consent before launching the installer', async () => {
+  const sequence = []
+  const { adapter, controller } = createSupportedController({
+    now: () => new Date('2026-08-13T02:00:00.000Z'),
+    recordUpdateConsent: (...args) => sequence.push(['record', ...args]),
+    beforeInstall: async () => sequence.push(['prepare']),
+  })
+  adapter.quitAndInstall = (...args) => {
+    adapter.installCalls += 1
+    sequence.push(['install', ...args])
+  }
+  adapter.emit('update-downloaded', {
+    version: '1.3.0',
+    releaseName: 'Dayline 1.3.0',
+    releaseNotes: 'Release body',
+  })
+
+  await controller.install()
+  assert.deepEqual(sequence, [
+    ['record', '1.2.3', '1.3.0', '2026-08-13T02:00:00.000Z', 'Dayline 1.3.0', 'Release body'],
+    ['prepare'],
+    ['install', true, true],
+  ])
+})
+
+test('manual install is blocked when fallback consent persistence fails', async () => {
+  let prepareCalls = 0
+  const { adapter, controller } = createSupportedController({
+    recordUpdateConsent: () => { throw new Error('database unavailable') },
+    beforeInstall: async () => { prepareCalls += 1 },
+  })
+  adapter.emit('update-downloaded', { version: '1.3.0' })
+
+  const state = await controller.install()
+  assert.equal(adapter.installCalls, 0)
+  assert.equal(prepareCalls, 0)
+  assert.equal(state.status, 'downloaded')
+  assert.equal(state.canInstall, true)
+  assert.equal(state.error, 'UPDATE_INSTALL_FAILED')
 })
 
 test('a provider download error revokes auto-install consent even if completion arrives later', async () => {
@@ -448,6 +545,237 @@ test('sanitizes provider errors and does not expose URLs, tokens, or local paths
   )
 })
 
+test('loads and persists installed release history during startup update checks', async () => {
+  const calls = []
+  const { adapter, controller } = createSupportedController({
+    initialInstalledReleaseHistory: {
+      state: 'notes-unavailable',
+      fromVersion: '1.0.0',
+      toVersion: '1.2.3',
+      releaseName: null,
+      releaseNotes: null,
+      recordedAt: '2026-08-12T00:00:00.000Z',
+    },
+    fetchReleaseHistory: async (range) => {
+      calls.push(['fetch', range])
+      return { releaseName: 'Dayline 1.2.3', releaseNotes: '<p>누적 변경</p>' }
+    },
+    saveInstalledReleaseNotes: (history) => {
+      calls.push(['save', history])
+      return history
+    },
+  })
+  adapter.checkImplementation = async () => adapter.emit('update-not-available', { version: '1.2.3' })
+
+  const state = await controller.startupCheck()
+  assert.equal(state.status, 'not-available')
+  assert.deepEqual(state.installedReleaseHistory, {
+    state: 'ready',
+    fromVersion: '1.0.0',
+    toVersion: '1.2.3',
+    releaseName: 'Dayline 1.2.3',
+    releaseNotes: '누적 변경',
+    recordedAt: '2026-08-12T00:00:00.000Z',
+  })
+  assert.deepEqual(calls[0], ['fetch', { fromVersion: '1.0.0', toVersion: '1.2.3' }])
+  assert.equal(calls[1][0], 'save')
+})
+
+test('retries unavailable installed release notes on a manual update check', async () => {
+  let fetchCalls = 0
+  const { adapter, controller } = createSupportedController({
+    fetchReleaseHistory: async ({ fromVersion, toVersion }) => {
+      fetchCalls += 1
+      if (fetchCalls === 1) throw new Error('offline')
+      return { releaseName: `Dayline ${toVersion}`, releaseNotes: `현재 버전 ${toVersion}` }
+    },
+    saveInstalledReleaseNotes: (history) => history,
+  })
+  adapter.checkImplementation = async () => adapter.emit('update-not-available', { version: '1.2.3' })
+
+  let state = await controller.startupCheck()
+  assert.equal(state.installedReleaseHistory.state, 'no-baseline')
+  state = await controller.check()
+  assert.equal(fetchCalls, 2)
+  assert.deepEqual(state.installedReleaseHistory, {
+    state: 'ready',
+    fromVersion: null,
+    toVersion: '1.2.3',
+    releaseName: 'Dayline 1.2.3',
+    releaseNotes: '현재 버전 1.2.3',
+    recordedAt: null,
+  })
+})
+
+test('refreshes cached installed notes once online and preserves them across offline retry', async () => {
+  let fetchCalls = 0
+  const initialInstalledReleaseHistory = {
+    state: 'ready',
+    fromVersion: '1.0.0',
+    targetVersion: '1.2.3',
+    toVersion: '1.2.3',
+    releaseName: 'Cached release',
+    releaseNotes: 'Cached notes',
+    recordedAt: '2026-08-12T00:00:00.000Z',
+    completedAt: '2026-08-13T00:00:00.000Z',
+    verified: false,
+  }
+  const { adapter, controller } = createSupportedController({
+    initialInstalledReleaseHistory,
+    fetchReleaseHistory: async () => {
+      fetchCalls += 1
+      if (fetchCalls === 1) throw new Error('offline')
+      return { releaseName: 'Verified release', releaseNotes: 'Verified complete notes' }
+    },
+    saveInstalledReleaseNotes: (history) => ({ ...history, verified: true }),
+  })
+  adapter.checkImplementation = async () => adapter.emit('update-not-available', { version: '1.2.3' })
+
+  let state = await controller.startupCheck()
+  assert.equal(fetchCalls, 1)
+  assert.equal(state.installedReleaseHistory.releaseNotes, 'Cached notes')
+  state = await controller.check()
+  assert.equal(fetchCalls, 2)
+  assert.equal(state.installedReleaseHistory.releaseName, 'Verified release')
+  assert.equal(state.installedReleaseHistory.releaseNotes, 'Verified complete notes')
+  await controller.check()
+  assert.equal(fetchCalls, 2)
+})
+
+test('preserves REST cumulative notes above the per-release cap through persistence and renderer state', async () => {
+  const cumulativeNotes = normalizeReleaseNotes([
+    { version: '1.2.2', note: `Older ${'a'.repeat(40 * 1024)}` },
+    { version: '1.2.3', note: `Latest ${'b'.repeat(40 * 1024)}` },
+  ])
+  assert.ok(cumulativeNotes.length > 64 * 1024)
+  let persistedNotes = null
+  const { adapter, controller } = createSupportedController({
+    initialInstalledReleaseHistory: {
+      state: 'notes-unavailable',
+      fromVersion: '1.2.1',
+      targetVersion: '1.2.3',
+      toVersion: '1.2.3',
+      releaseName: null,
+      releaseNotes: null,
+      recordedAt: '2026-08-12T00:00:00.000Z',
+      completedAt: '2026-08-13T00:00:00.000Z',
+      verified: false,
+    },
+    fetchReleaseHistory: async () => ({
+      releaseName: 'Dayline 1.2.3',
+      releaseNotes: cumulativeNotes,
+    }),
+    saveInstalledReleaseNotes: (history) => {
+      persistedNotes = history.releaseNotes
+      return { ...history, verified: true }
+    },
+  })
+  adapter.checkImplementation = async () => adapter.emit('update-not-available', { version: '1.2.3' })
+
+  const state = await controller.startupCheck()
+  assert.equal(persistedNotes, cumulativeNotes)
+  assert.equal(state.installedReleaseHistory.releaseNotes, cumulativeNotes)
+})
+
+test('paginates GitHub releases, filters unsafe entries, and preserves an ascending skipped range', async () => {
+  const release = (version, body, extra = {}) => ({
+    tag_name: `v${version}`,
+    name: `Dayline v${version}`,
+    body,
+    draft: false,
+    prerelease: false,
+    ...extra,
+  })
+  const pageOne = [
+    release('0.3.3', '<h2>v0.3.3</h2><p>latest</p><script>bad()</script>'),
+    release('0.3.0', 'published out of semantic order'),
+    release('0.3.2-beta.1', 'prerelease by semver'),
+    release('0.3.2', 'draft body', { draft: true }),
+    ...Array.from({ length: 96 }, (_, index) => ({ tag_name: `invalid-${index}`, body: 'ignored' })),
+  ]
+  const pageTwo = [
+    release('0.3.1', 'first'),
+    release('0.3.2', 'second'),
+    release('0.3.2-rc.1', 'prerelease flag', { prerelease: true }),
+  ]
+  const requestedUrls = []
+  const fetched = await fetchGitHubReleaseHistory({
+    owner: 'lsy4946',
+    repo: 'dayline',
+    fromVersion: '0.3.0',
+    toVersion: '0.3.3',
+    fetchImpl: async (url) => {
+      requestedUrls.push(url)
+      const body = JSON.stringify(url.endsWith('page=1') ? pageOne : pageTwo)
+      return { ok: true, headers: { get: () => String(Buffer.byteLength(body)) }, text: async () => body }
+    },
+  })
+
+  assert.deepEqual(requestedUrls, [
+    'https://api.github.com/repos/lsy4946/dayline/releases?per_page=100&page=1',
+    'https://api.github.com/repos/lsy4946/dayline/releases?per_page=100&page=2',
+  ])
+  assert.equal(fetched.releaseName, 'Dayline v0.3.3')
+  assert.ok(fetched.releaseNotes.indexOf('## v0.3.1') < fetched.releaseNotes.indexOf('## v0.3.2'))
+  assert.ok(fetched.releaseNotes.indexOf('## v0.3.2') < fetched.releaseNotes.indexOf('## v0.3.3'))
+  assert.equal((fetched.releaseNotes.match(/## v0\.3\.3/g) || []).length, 1)
+  assert.equal(fetched.releaseNotes.includes('latest'), true)
+  assert.equal(fetched.releaseNotes.includes('bad()'), false)
+  assert.equal(fetched.releaseNotes.includes('draft body'), false)
+  assert.equal(fetched.releaseNotes.includes('prerelease'), false)
+  assert.equal(fetched.releaseNotes.includes('published out of semantic order'), false)
+})
+
+test('rejects a release range that cannot be completed within the pagination cap', async () => {
+  let calls = 0
+  await assert.rejects(() => fetchGitHubReleaseHistory({
+    owner: 'lsy4946',
+    repo: 'dayline',
+    fromVersion: '0.1.0',
+    toVersion: '0.3.3',
+    fetchImpl: async () => {
+      calls += 1
+      const body = JSON.stringify([
+        { tag_name: 'v0.3.3', name: 'Latest', body: 'Latest body', draft: false, prerelease: false },
+        ...Array.from({ length: 99 }, (_, index) => ({ tag_name: `invalid-${calls}-${index}` })),
+      ])
+      return { ok: true, headers: { get: () => String(Buffer.byteLength(body)) }, text: async () => body }
+    },
+  }), /incomplete/)
+  assert.equal(calls, 10)
+})
+
+test('normalizes malformed installed release history without exposing unsafe state', () => {
+  assert.deepEqual(normalizeInstalledReleaseHistory(null, '1.2.3'), NO_INSTALLED_HISTORY_1_2_3)
+  assert.deepEqual(normalizeInstalledReleaseHistory({
+    state: 'ready',
+    fromVersion: '1.0.0',
+    toVersion: '1.2.3',
+    releaseName: ' Dayline   1.2.3 ',
+    releaseNotes: '<script>bad()</script><p>변경</p>',
+    recordedAt: '2026-08-13T00:00:00+09:00',
+  }, '1.2.3'), {
+    state: 'ready',
+    fromVersion: '1.0.0',
+    toVersion: '1.2.3',
+    releaseName: 'Dayline 1.2.3',
+    releaseNotes: '변경',
+    recordedAt: '2026-08-12T15:00:00.000Z',
+  })
+
+  const cumulativeNotes = `## v1.2.2\n\n${'a'.repeat(40 * 1024)}\n\n## v1.2.3\n\n${'b'.repeat(40 * 1024)}<script>bad()</script>`
+  const cumulativeHistory = normalizeInstalledReleaseHistory({
+    state: 'ready',
+    fromVersion: '1.2.1',
+    toVersion: '1.2.3',
+    releaseName: 'Dayline 1.2.3',
+    releaseNotes: cumulativeNotes,
+    recordedAt: '2026-08-12T15:00:00.000Z',
+  }, '1.2.3')
+  assert.ok(cumulativeHistory.releaseNotes.length > 64 * 1024)
+  assert.equal(cumulativeHistory.releaseNotes.includes('bad()'), false)
+})
+
 test('normalizes full changelog arrays in ascending version order and deduplicates releases', () => {
   const notes = normalizeReleaseNotes([
     { version: '0.3.2', note: '<h3>최신</h3><p>두 번째 변경</p><a href="https://example.com">안전한 링크 문구</a>' },
@@ -477,7 +805,7 @@ test('handles string and malformed release notes and caps output without splitti
   assert.equal(normalizeReleaseNotes([undefined, 42, { version: 'bad', note: 7 }]), null)
 
   const capped = normalizeReleaseNotes(`${'a'.repeat(128 * 1024 - 1)}😀tail`)
-  assert.ok(capped.length <= 128 * 1024)
+  assert.ok(capped.length <= 64 * 1024)
   assert.equal(/[\uD800-\uDBFF]$/.test(capped), false)
 })
 

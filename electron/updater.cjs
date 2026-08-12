@@ -2,7 +2,11 @@ const path = require('node:path')
 
 const MAX_RELEASE_NOTES_LENGTH = 128 * 1024
 const MAX_RELEASE_NOTE_SOURCE_LENGTH = 64 * 1024
-const MAX_RELEASE_NOTE_ENTRIES = 100
+const MAX_RELEASE_NOTE_ENTRIES = 1000
+const MAX_RELEASE_FEED_LENGTH = 2 * 1024 * 1024
+const RELEASE_FEED_TIMEOUT_MS = 12_000
+const GITHUB_RELEASE_PAGE_SIZE = 100
+const MAX_GITHUB_RELEASE_PAGES = 10
 
 const UPDATE_STATUSES = new Set([
   'unsupported',
@@ -44,9 +48,9 @@ function truncateTextSafely(value, maxLength) {
   return truncated.trimEnd()
 }
 
-function sanitizeReleaseNoteText(value) {
+function sanitizeReleaseNoteText(value, maxSourceLength = MAX_RELEASE_NOTE_SOURCE_LENGTH) {
   if (typeof value !== 'string') return ''
-  const text = truncateTextSafely(value, MAX_RELEASE_NOTE_SOURCE_LENGTH)
+  const text = truncateTextSafely(value, maxSourceLength)
   return text
     .replace(/\r\n?/g, '\n')
     .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
@@ -68,6 +72,12 @@ function sanitizeReleaseNoteText(value) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function normalizeCumulativeReleaseNotes(value) {
+  if (typeof value !== 'string') return null
+  const text = sanitizeReleaseNoteText(value, MAX_RELEASE_NOTES_LENGTH)
+  return truncateTextSafely(text, MAX_RELEASE_NOTES_LENGTH) || null
 }
 
 function parseReleaseVersion(value) {
@@ -122,6 +132,53 @@ function releaseVersionKey(value) {
   return parseReleaseVersion(value)?.key ?? null
 }
 
+function compareReleasePrecedence(left, right) {
+  const leftVersion = typeof left === 'string' ? parseReleaseVersion(left) : left
+  const rightVersion = typeof right === 'string' ? parseReleaseVersion(right) : right
+  if (!leftVersion || !rightVersion) return null
+  const leftWithoutBuild = { ...leftVersion, key: '' }
+  const rightWithoutBuild = { ...rightVersion, key: '' }
+  return compareReleaseVersions(leftWithoutBuild, rightWithoutBuild)
+}
+
+function noInstalledReleaseHistory(currentVersion) {
+  return {
+    state: 'no-baseline',
+    fromVersion: null,
+    toVersion: releaseVersionKey(currentVersion) || String(currentVersion || ''),
+    releaseName: null,
+    releaseNotes: null,
+    recordedAt: null,
+  }
+}
+
+function normalizeInstalledReleaseHistory(value, currentVersion) {
+  const fallback = noInstalledReleaseHistory(currentVersion)
+  if (!value || typeof value !== 'object') return fallback
+  const toVersion = releaseVersionKey(value.toVersion)
+  const fromVersion = value.fromVersion == null ? null : releaseVersionKey(value.fromVersion)
+  if (!toVersion || (value.fromVersion != null && !fromVersion)) return fallback
+  const releaseNotes = normalizeCumulativeReleaseNotes(value.releaseNotes)
+  const requestedState = value.state === 'ready' && releaseNotes
+    ? 'ready'
+    : value.state === 'notes-unavailable' || value.state === 'ready'
+      ? 'notes-unavailable'
+      : 'no-baseline'
+  if (requestedState === 'no-baseline') return { ...fallback, toVersion }
+  return {
+    state: requestedState,
+    fromVersion,
+    toVersion,
+    releaseName: typeof value.releaseName === 'string'
+      ? value.releaseName.replace(/\s+/g, ' ').trim().slice(0, 200) || null
+      : null,
+    releaseNotes: requestedState === 'ready' ? releaseNotes : null,
+    recordedAt: typeof value.recordedAt === 'string' && Number.isFinite(Date.parse(value.recordedAt))
+      ? new Date(value.recordedAt).toISOString()
+      : null,
+  }
+}
+
 function joinReleaseNoteSectionsPrioritizingLatest(versionedSections, unversionedSections) {
   const selectedNewestFirst = []
   let usedLength = 0
@@ -149,6 +206,19 @@ function joinReleaseNoteSectionsPrioritizingLatest(versionedSections, unversione
   return selected.join('\n\n') || null
 }
 
+function stripMatchingReleaseHeading(note, version) {
+  if (!note) return note
+  const lines = note.split('\n')
+  const firstContentIndex = lines.findIndex((line) => line.trim())
+  if (firstContentIndex < 0) return ''
+  const heading = /^#{1,6}\s+(.+?)\s*#*\s*$/.exec(lines[firstContentIndex].trim())
+  const headingVersion = parseReleaseVersion(heading?.[1] || '')
+  if (!headingVersion || headingVersion.key !== version.key) return note
+  lines.splice(firstContentIndex, 1)
+  while (lines[firstContentIndex]?.trim() === '') lines.splice(firstContentIndex, 1)
+  return lines.join('\n').trim()
+}
+
 function normalizeReleaseNotes(value) {
   if (typeof value === 'string') {
     const text = sanitizeReleaseNoteText(value)
@@ -159,13 +229,14 @@ function normalizeReleaseNotes(value) {
   const versioned = new Map()
   const unversioned = []
   for (const entry of value.slice(0, MAX_RELEASE_NOTE_ENTRIES)) {
-    const noteValue = typeof entry === 'string' ? entry : entry?.note
-    const note = sanitizeReleaseNoteText(noteValue)
     const version = parseReleaseVersion(entry?.version)
+    const noteValue = typeof entry === 'string' ? entry : entry?.note
+    let note = sanitizeReleaseNoteText(noteValue)
     if (!version) {
       if (note && !unversioned.includes(note)) unversioned.push(note)
       continue
     }
+    note = stripMatchingReleaseHeading(note, version)
 
     const existing = versioned.get(version.key)
     if (existing) {
@@ -197,6 +268,105 @@ function normalizeUpdateInfo(info) {
   }
 }
 
+async function fetchGitHubReleaseHistory({
+  owner,
+  repo,
+  fromVersion = null,
+  toVersion,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = RELEASE_FEED_TIMEOUT_MS,
+}) {
+  if (!/^[0-9A-Za-z_.-]{1,100}$/.test(owner) || !/^[0-9A-Za-z_.-]{1,100}$/.test(repo)) {
+    throw new Error('Invalid GitHub repository')
+  }
+  if (typeof fetchImpl !== 'function') throw new Error('GitHub release feed is unavailable')
+  const to = parseReleaseVersion(toVersion)
+  const from = fromVersion == null ? null : parseReleaseVersion(fromVersion)
+  if (!to || to.prerelease !== null || (fromVersion != null && !from)) {
+    throw new Error('Invalid release history range')
+  }
+
+  const releases = new Map()
+  let releaseName = null
+  let targetFound = false
+  let rangeComplete = false
+
+  for (let page = 1; page <= MAX_GITHUB_RELEASE_PAGES; page += 1) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    timeout.unref?.()
+    let values
+    try {
+      const url = `https://api.github.com/repos/${owner}/${repo}/releases?per_page=${GITHUB_RELEASE_PAGE_SIZE}&page=${page}`
+      const response = await fetchImpl(url, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'Dayline-Updater',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        redirect: 'follow',
+        signal: controller.signal,
+      })
+      if (!response?.ok) throw new Error('GitHub release history request failed')
+      const contentLength = Number(response.headers?.get?.('content-length'))
+      if (Number.isFinite(contentLength) && contentLength > MAX_RELEASE_FEED_LENGTH) {
+        throw new Error('GitHub release history response is too large')
+      }
+      const responseText = await response.text()
+      if (Buffer.byteLength(responseText, 'utf8') > MAX_RELEASE_FEED_LENGTH) {
+        throw new Error('GitHub release history response is too large')
+      }
+      values = JSON.parse(responseText)
+      if (!Array.isArray(values)) throw new Error('Invalid GitHub release history response')
+    } finally {
+      clearTimeout(timeout)
+    }
+
+    if (values.length === 0) {
+      rangeComplete = true
+      break
+    }
+
+    for (const value of values.slice(0, GITHUB_RELEASE_PAGE_SIZE)) {
+      if (!value || typeof value !== 'object' || value.draft === true || value.prerelease === true) continue
+      const version = parseReleaseVersion(value.tag_name)
+      if (!version || version.prerelease !== null) continue
+      const throughTarget = compareReleasePrecedence(version, to) <= 0
+      if (!throughTarget) continue
+      if (from && compareReleasePrecedence(version, from) <= 0) {
+        continue
+      }
+      if (!from && compareReleasePrecedence(version, to) !== 0) continue
+
+      if (compareReleasePrecedence(version, to) === 0) {
+        targetFound = true
+        releaseName = sanitizeReleaseNoteText(value.name || value.tag_name)
+          .replace(/\s+/g, ' ').slice(0, 200) || null
+      }
+      if (!releases.has(version.key) && releases.size < MAX_RELEASE_NOTE_ENTRIES) {
+        releases.set(version.key, { version: version.key, note: value.body })
+      }
+    }
+
+    if ((from === null && targetFound) || values.length < GITHUB_RELEASE_PAGE_SIZE) {
+      rangeComplete = true
+      break
+    }
+  }
+
+  if (!targetFound || !rangeComplete) throw new Error('GitHub release history range is incomplete')
+  const releaseNotes = normalizeReleaseNotes([...releases.values()])
+  if (!releaseNotes || ![...releases.values()].some((entry) => sanitizeReleaseNoteText(entry.note))) {
+    throw new Error('GitHub release notes are unavailable')
+  }
+  return {
+    fromVersion: from?.key ?? null,
+    toVersion: to.key,
+    releaseName,
+    releaseNotes,
+  }
+}
+
 function sanitizeUpdaterError(error, operation = 'unknown') {
   const normalizedOperation = ['check', 'download', 'install'].includes(operation)
     ? operation.toUpperCase()
@@ -217,17 +387,28 @@ function createUpdaterController({
   broadcast = () => {},
   beforeInstall = async () => {},
   afterInstallFailure = async () => {},
+  initialInstalledReleaseHistory = null,
+  recordUpdateConsent = () => {},
+  fetchReleaseHistory = null,
+  saveInstalledReleaseNotes = async (history) => history,
+  now = () => new Date(),
 }) {
   if (!adapter || typeof adapter.on !== 'function') {
     throw new TypeError('An updater adapter with event support is required')
   }
 
+  let installedReleaseHistoryRecord = initialInstalledReleaseHistory
+    && typeof initialInstalledReleaseHistory === 'object'
+    ? { ...initialInstalledReleaseHistory }
+    : null
+  let releaseHistoryNeedsRefresh = installedReleaseHistoryRecord?.verified !== true
   let state = {
     status: support.supported ? 'idle' : 'unsupported',
     currentVersion,
     availableVersion: null,
     releaseName: null,
     releaseNotes: null,
+    installedReleaseHistory: normalizeInstalledReleaseHistory(initialInstalledReleaseHistory, currentVersion),
     progress: null,
     error: null,
     unsupportedReason: support.reason,
@@ -243,6 +424,15 @@ function createUpdaterController({
   let installRecoveryPromise = null
   let downloadAttemptSequence = 0
   let explicitDownloadConsent = null
+  let recordedConsentVersion = null
+  let releaseHistoryPromise = null
+
+  function cloneState() {
+    return {
+      ...state,
+      installedReleaseHistory: { ...state.installedReleaseHistory },
+    }
+  }
 
   function publish(patch) {
     const nextStatus = patch.status || state.status
@@ -255,12 +445,57 @@ function createUpdaterController({
       canDownload: support.supported && nextStatus === 'available',
       canInstall: support.supported && nextStatus === 'downloaded',
     }
-    broadcast({ ...state })
-    return { ...state }
+    const snapshot = cloneState()
+    broadcast(snapshot)
+    return snapshot
   }
 
   function getState() {
-    return { ...state }
+    return cloneState()
+  }
+
+  function refreshInstalledReleaseHistory() {
+    if (!support.supported || typeof fetchReleaseHistory !== 'function') return Promise.resolve(getState())
+    if (!releaseHistoryNeedsRefresh) return Promise.resolve(getState())
+    if (releaseHistoryPromise) return releaseHistoryPromise
+
+    const openingHistory = { ...state.installedReleaseHistory }
+    const fromVersion = openingHistory.state === 'no-baseline' ? null : openingHistory.fromVersion
+    const toVersion = openingHistory.state === 'no-baseline'
+      ? releaseVersionKey(currentVersion)
+      : openingHistory.toVersion
+    if (!toVersion) return Promise.resolve(getState())
+
+    releaseHistoryPromise = Promise.resolve()
+      .then(() => fetchReleaseHistory({ fromVersion, toVersion }))
+      .then((result) => {
+        const releaseNotes = normalizeCumulativeReleaseNotes(result?.releaseNotes)
+        if (!releaseNotes) return getState()
+        const candidate = {
+          state: 'ready',
+          fromVersion,
+          targetVersion: installedReleaseHistoryRecord?.targetVersion || toVersion,
+          toVersion,
+          releaseName: typeof result?.releaseName === 'string' ? result.releaseName : null,
+          releaseNotes,
+          recordedAt: openingHistory.recordedAt,
+          completedAt: installedReleaseHistoryRecord?.completedAt ?? null,
+          verified: true,
+        }
+        return Promise.resolve(saveInstalledReleaseNotes(candidate)).then((saved) => {
+          installedReleaseHistoryRecord = saved && typeof saved === 'object'
+            ? { ...saved }
+            : { ...candidate }
+          releaseHistoryNeedsRefresh = false
+          const installedReleaseHistory = normalizeInstalledReleaseHistory(saved || candidate, currentVersion)
+          return publish({ installedReleaseHistory })
+        })
+      })
+      .catch(() => getState())
+      .finally(() => {
+        releaseHistoryPromise = null
+      })
+    return releaseHistoryPromise
   }
 
   function updateInfoState(status, info, extra = {}) {
@@ -355,7 +590,10 @@ function createUpdaterController({
 
     publish({ status: 'checking', progress: null, error: null })
     checkPromise = Promise.resolve()
-      .then(() => adapter.checkForUpdates())
+      .then(() => Promise.all([
+        adapter.checkForUpdates(),
+        refreshInstalledReleaseHistory(),
+      ]))
       .then(() => getState())
       .catch((error) => publish({
         status: 'error',
@@ -374,11 +612,38 @@ function createUpdaterController({
     return check()
   }
 
+  function ensureUpdateConsentRecorded() {
+    const targetVersion = releaseVersionKey(state.availableVersion)
+    if (!targetVersion) throw new Error('A downloaded update version is required')
+    if (recordedConsentVersion === targetVersion) return
+    const recordedAt = now().toISOString()
+    const result = recordUpdateConsent(
+      currentVersion,
+      targetVersion,
+      recordedAt,
+      state.releaseName,
+      state.releaseNotes,
+    )
+    if (result && typeof result.then === 'function') {
+      throw new Error('Update consent persistence must be synchronous')
+    }
+    recordedConsentVersion = targetVersion
+  }
+
   async function download() {
     if (!support.supported || state.status !== 'available') return getState()
     if (downloadPromise) return downloadPromise
 
     const consentedVersion = releaseVersionKey(state.availableVersion)
+    try {
+      ensureUpdateConsentRecorded()
+    } catch {
+      return publish({
+        status: 'available',
+        progress: null,
+        error: 'UPDATE_DOWNLOAD_FAILED',
+      })
+    }
     const attempt = ++downloadAttemptSequence
     explicitDownloadConsent = consentedVersion ? { attempt, version: consentedVersion } : null
     publish({ status: 'downloading', progress: 0, error: null })
@@ -403,6 +668,16 @@ function createUpdaterController({
   async function install() {
     if (!support.supported || state.status !== 'downloaded') return getState()
     if (installPromise || quitAndInstallTriggered) return installPromise || getState()
+
+    try {
+      ensureUpdateConsentRecorded()
+    } catch {
+      return publish({
+        status: 'downloaded',
+        progress: 100,
+        error: 'UPDATE_INSTALL_FAILED',
+      })
+    }
 
     quitAndInstallTriggered = true
     publish({ status: 'installing', progress: 100, error: null })
@@ -435,7 +710,9 @@ function configureAutoUpdater(adapter) {
 module.exports = {
   configureAutoUpdater,
   createUpdaterController,
+  fetchGitHubReleaseHistory,
   getUpdateSupport,
+  normalizeInstalledReleaseHistory,
   normalizeReleaseNotes,
   normalizeUpdateInfo,
   sanitizeUpdaterError,

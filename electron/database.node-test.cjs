@@ -1009,3 +1009,237 @@ test('queues nested task and daily-note payloads for a future linked profile', (
   assert.equal(JSON.parse(settingsOutbox.payload_json).sidebarSplit, 42)
   sqlite.close()
 })
+
+test('records cached update consent and reconciles an exact installed target offline', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  let database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const initialRevision = database.readStore().revision
+
+  assert.equal(database.readInstalledReleaseHistory(), null)
+  assert.deepEqual(database.recordUpdateConsent(
+    'v0.3.2',
+    '0.3.4',
+    '2026-09-09T05:00:00+00:00',
+    ' Dayline   v0.3.4 ',
+    '\n## v0.3.3\n\nFirst\n\n## v0.3.4\n\nSecond\n',
+  ), {
+    fromVersion: '0.3.2',
+    targetVersion: '0.3.4',
+    recordedAt: '2026-09-09T05:00:00.000Z',
+    releaseName: 'Dayline v0.3.4',
+    releaseNotes: '## v0.3.3\n\nFirst\n\n## v0.3.4\n\nSecond',
+  })
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+
+  database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  assert.equal(database.reconcileUpdateHistory('0.3.2', '2026-09-09T05:01:00.000Z'), null)
+  assert.equal(database.reconcileUpdateHistory('0.3.3', '2026-09-09T05:02:00.000Z'), null)
+  const reconciled = database.reconcileUpdateHistory('v0.3.4', '2026-09-09T05:03:00.000Z')
+  assert.deepEqual(reconciled, {
+    state: 'ready',
+    fromVersion: '0.3.2',
+    targetVersion: '0.3.4',
+    toVersion: '0.3.4',
+    releaseName: 'Dayline v0.3.4',
+    releaseNotes: '## v0.3.3\n\nFirst\n\n## v0.3.4\n\nSecond',
+    recordedAt: '2026-09-09T05:00:00.000Z',
+    completedAt: '2026-09-09T05:03:00.000Z',
+    verified: false,
+  })
+  assert.deepEqual(database.readInstalledReleaseHistory(), reconciled)
+  assert.equal(database.reconcileUpdateHistory('0.3.4', '2026-09-09T05:04:00.000Z'), null)
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+
+  const inspected = new DatabaseSync(paths.databasePath, { readOnly: true })
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM sync_outbox`).get().count, 0)
+  assert.equal(inspected.prepare(`
+    SELECT COUNT(*) AS count FROM app_meta WHERE key = 'pending_update_consent_v1'
+  `).get().count, 0)
+  assert.equal(inspected.prepare(`
+    SELECT COUNT(*) AS count FROM app_meta WHERE key = 'installed_release_history_v1'
+  `).get().count, 1)
+  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 4)
+  inspected.close()
+})
+
+test('marks jumped installed versions unavailable and safely fills their notes later', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const initialRevision = database.readStore().revision
+  database.recordUpdateConsent(
+    '1.0.0-beta.2',
+    '1.0.0-beta.10',
+    '2026-09-09T06:00:00.000Z',
+    'Dayline preview',
+    'Cached notes stop at beta.10',
+  )
+
+  const unavailable = database.reconcileUpdateHistory('1.0.0', '2026-09-09T06:01:00.000Z')
+  assert.deepEqual(unavailable, {
+    state: 'notes-unavailable',
+    fromVersion: '1.0.0-beta.2',
+    targetVersion: '1.0.0-beta.10',
+    toVersion: '1.0.0',
+    releaseName: null,
+    releaseNotes: null,
+    recordedAt: '2026-09-09T06:00:00.000Z',
+    completedAt: '2026-09-09T06:01:00.000Z',
+    verified: false,
+  })
+
+  const ready = database.saveInstalledReleaseNotes({
+    ...unavailable,
+    state: 'ready',
+    targetVersion: '1.0.0',
+    releaseName: ' Dayline   1.0.0 ',
+    releaseNotes: '\n## v1.0.0-beta.10\n\nPreview\n\n## v1.0.0\n\nStable\n',
+  })
+  assert.deepEqual(ready, {
+    ...unavailable,
+    state: 'ready',
+    releaseName: 'Dayline 1.0.0',
+    releaseNotes: '## v1.0.0-beta.10\n\nPreview\n\n## v1.0.0\n\nStable',
+    verified: true,
+  })
+  assert.deepEqual(database.readInstalledReleaseHistory(), ready)
+
+  assert.throws(() => database.saveInstalledReleaseNotes({
+    ...ready,
+    targetVersion: '1.0.1',
+    toVersion: '1.0.1',
+  }), /do not match/)
+  assert.throws(() => database.saveInstalledReleaseNotes({
+    ...ready,
+    recordedAt: '2026-09-09T06:00:01.000Z',
+  }), /do not match/)
+  assert.deepEqual(database.readInstalledReleaseHistory(), ready)
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+})
+
+test('bootstraps ready notes without inventing a prior version baseline', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const initialRevision = database.readStore().revision
+
+  const baseline = database.saveInstalledReleaseNotes({
+    state: 'ready',
+    fromVersion: null,
+    targetVersion: 'v0.3.3',
+    toVersion: '0.3.3',
+    releaseName: 'Dayline v0.3.3',
+    releaseNotes: '- First visible release notes',
+    recordedAt: null,
+    completedAt: null,
+    verified: true,
+  })
+  assert.deepEqual(baseline, {
+    state: 'ready',
+    fromVersion: null,
+    targetVersion: '0.3.3',
+    toVersion: '0.3.3',
+    releaseName: 'Dayline v0.3.3',
+    releaseNotes: '- First visible release notes',
+    recordedAt: null,
+    completedAt: null,
+    verified: true,
+  })
+  assert.deepEqual(database.readInstalledReleaseHistory(), baseline)
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+
+  const reopened = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  assert.deepEqual(reopened.readInstalledReleaseHistory(), baseline)
+  assert.equal(reopened.readStore().revision, initialRevision)
+  reopened.close()
+})
+
+test('validates update metadata without changing user data revision', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const initialRevision = database.readStore().revision
+
+  assert.throws(
+    () => database.recordUpdateConsent('0.3.2', '0.3.2+other-build', FIXED_NOW.toISOString()),
+    /newer than/,
+  )
+  assert.throws(
+    () => database.recordUpdateConsent('1.0.0-beta.01', '1.0.0', FIXED_NOW.toISOString()),
+    /semantic version/,
+  )
+  assert.throws(
+    () => database.recordUpdateConsent('0.3.2', '0.3.3', 'not-a-date'),
+    /valid timestamp/,
+  )
+  assert.throws(() => database.saveInstalledReleaseNotes({
+    state: 'ready',
+    fromVersion: null,
+    targetVersion: '0.3.3',
+    toVersion: '0.3.3',
+    releaseName: null,
+    releaseNotes: 'x'.repeat((128 * 1024) + 1),
+    recordedAt: null,
+    completedAt: null,
+  }), /too long/)
+  assert.equal(database.readInstalledReleaseHistory(), null)
+  assert.deepEqual(
+    database.recordUpdateConsent('0.3.2', '0.3.3', '2026-09-09T06:30:00.000Z'),
+    {
+      fromVersion: '0.3.2',
+      targetVersion: '0.3.3',
+      recordedAt: '2026-09-09T06:30:00.000Z',
+      releaseName: null,
+      releaseNotes: null,
+    },
+  )
+  assert.equal(
+    database.reconcileUpdateHistory('0.3.3', '2026-09-09T06:31:00.000Z').state,
+    'notes-unavailable',
+  )
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+})
+
+test('rolls back pending reconciliation when its installed metadata write fails', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  let database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const initialRevision = database.readStore().revision
+  database.recordUpdateConsent('0.3.2', '0.3.3', '2026-09-09T07:00:00.000Z')
+  database.close()
+
+  const setup = new DatabaseSync(paths.databasePath)
+  setup.exec(`
+    CREATE TRIGGER fail_installed_release_history
+    BEFORE INSERT ON app_meta
+    WHEN NEW.key = 'installed_release_history_v1'
+    BEGIN
+      SELECT RAISE(ABORT, 'forced installed history failure');
+    END;
+  `)
+  setup.close()
+
+  database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  assert.throws(
+    () => database.reconcileUpdateHistory('0.3.3', '2026-09-09T07:01:00.000Z'),
+    /forced installed history failure/,
+  )
+  assert.equal(database.readInstalledReleaseHistory(), null)
+  assert.equal(database.readStore().revision, initialRevision)
+  database.close()
+
+  const inspected = new DatabaseSync(paths.databasePath, { readOnly: true })
+  assert.equal(inspected.prepare(`
+    SELECT COUNT(*) AS count FROM app_meta WHERE key = 'pending_update_consent_v1'
+  `).get().count, 1)
+  assert.equal(inspected.prepare(`
+    SELECT COUNT(*) AS count FROM app_meta WHERE key = 'installed_release_history_v1'
+  `).get().count, 0)
+  inspected.close()
+})

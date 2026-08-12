@@ -175,12 +175,22 @@ export type UpdateUnsupportedReason =
   | 'portable'
   | 'not-installed'
 
+export interface InstalledReleaseHistory {
+  state: 'ready' | 'no-baseline' | 'notes-unavailable'
+  fromVersion: string | null
+  toVersion: string
+  releaseName: string | null
+  releaseNotes: string | null
+  recordedAt: string | null
+}
+
 export interface UpdateState {
   status: UpdateStatus
   currentVersion: string
   availableVersion: string | null
   releaseName: string | null
   releaseNotes: string | null
+  installedReleaseHistory: InstalledReleaseHistory
   progress: number | null
   error: string | null
   unsupportedReason: UpdateUnsupportedReason | null
