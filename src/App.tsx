@@ -222,14 +222,15 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     target: 'schedule-list',
     eyebrow: '선택 날짜의 일정',
     title: '오른쪽 아래에서 일정과 세부 할 일을 확인해요',
-    description: '선택한 날짜의 일정을 모아 보고, 일정을 클릭해 상세 내용을 열거나 세부 할 일을 바로 완료할 수 있어요.',
+    description: '선택한 날짜의 일정을 모아 보고 세부 할 일을 바로 완료할 수 있어요. 하위 태스크는 처음에 펼쳐지며, 상위 일정 오른쪽의 간략히/상세히 버튼으로 접거나 다시 펼칠 수 있습니다.',
     example: (
       <div className="help-example-subtasks">
-        <strong>발표 준비</strong><span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>1 / 2 완료</small>
+        <div className="help-example-subtask-head"><strong>발표 준비</strong><span>간략히 <ChevronUp size={11} /></span></div>
+        <span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>기본 펼침 · 1 / 2 완료</small>
       </div>
     ),
     tips: [
-      '하위 태스크가 있는 일정은 오른쪽의 간략히/상세히 버튼으로 목록을 접거나 펼칠 수 있어요.',
+      '간략히를 누르면 하위 목록이 접히고 버튼이 상세히로 바뀌어요. 상세히를 누르면 목록이 다시 펼쳐집니다.',
       '퀵 노트와 일정 사이 구분선을 드래그하거나 키보드로 움직여 두 영역의 높이를 조절할 수 있어요.',
     ],
   },
@@ -266,7 +267,7 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     target: 'appearance',
     eyebrow: '화면 설정',
     title: '글자 크기와 테마 색상을 조절해요',
-    description: '화면 배율을 85%부터 130%까지 바꾸고 앱 전체 강조색을 선택할 수 있습니다. 설정은 메인 창과 위젯에 함께 적용돼요.',
+    description: '화면 배율을 85%부터 150%까지 바꾸고 앱 전체 강조색을 선택할 수 있습니다. 설정은 메인 창과 위젯에 함께 적용돼요.',
     example: (
       <div className="help-example-appearance"><span>A</span><i><b /></i><strong>110%</strong><em style={{ background: '#4f86c6' }} /></div>
     ),
@@ -398,7 +399,7 @@ function taskVisualStyle(task: Pick<Task, 'tagId' | 'color'>, tags: TaskTag[]): 
 function themeVariables(settings: AppSettings): Record<string, string> {
   const rawTheme = normalizedHex(settings.themeColor)
   const theme = accessibleAccent(rawTheme)
-  const fontScale = clamp(settings.fontScale, 0.85, 1.3)
+  const fontScale = clamp(settings.fontScale, 0.85, 1.5)
   const fontVariables = Object.fromEntries(
     Array.from({ length: 32 }, (_, index) => {
       const size = index + 1
@@ -2005,7 +2006,7 @@ function AppearancePanel({
             type="range"
             data-qa="font-scale"
             min="0.85"
-            max="1.3"
+            max="1.5"
             step="0.05"
             value={settings.fontScale}
             aria-label="글자 및 화면 배율"
@@ -3468,7 +3469,7 @@ export default function App({ mode }: { mode: AppMode }) {
     const safe: Partial<AppSettings> = {
       ...(typeof changes.sidebarSplit === 'number' ? { sidebarSplit: clamp(changes.sidebarSplit, 20, 80) } : {}),
       ...(typeof changes.widgetSplit === 'number' ? { widgetSplit: clamp(changes.widgetSplit, 20, 80) } : {}),
-      ...(typeof changes.fontScale === 'number' ? { fontScale: clamp(changes.fontScale, 0.85, 1.3) } : {}),
+      ...(typeof changes.fontScale === 'number' ? { fontScale: clamp(changes.fontScale, 0.85, 1.5) } : {}),
       ...(changes.themeColor ? { themeColor: normalizedHex(changes.themeColor, storeRef.current.settings.themeColor) } : {}),
     }
     return commit((current) => ({ ...current, settings: { ...current.settings, ...safe } }))

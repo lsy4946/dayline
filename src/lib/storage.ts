@@ -106,7 +106,7 @@ function normalizeSettings(raw: unknown): AppSettings {
   return {
     sidebarSplit: clampNumber(value.sidebarSplit, 20, 80, DEFAULT_APP_SETTINGS.sidebarSplit),
     widgetSplit: clampNumber(value.widgetSplit, 20, 80, DEFAULT_APP_SETTINGS.widgetSplit),
-    fontScale: clampNumber(value.fontScale, 0.85, 1.3, DEFAULT_APP_SETTINGS.fontScale),
+    fontScale: clampNumber(value.fontScale, 0.85, 1.5, DEFAULT_APP_SETTINGS.fontScale),
     themeColor: normalizeHex(value.themeColor, DEFAULT_APP_SETTINGS.themeColor),
   }
 }

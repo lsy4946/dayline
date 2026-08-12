@@ -919,6 +919,109 @@ app.whenReady().then(async () => {
     're-expanded sidebar subtasks',
   )
 
+  qaStage = 'scaled-schedule-help-card'
+  mainWindow.setSize(1050, 680)
+  await waitForRenderer(
+    mainWindow,
+    `window.innerWidth <= 1050 && window.innerHeight <= 680`,
+    'minimum main viewport for scaled help',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="appearance"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="appearance-panel"]'))`,
+    'appearance panel for scaled help',
+  )
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="font-scale"]', '1.5')`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="font-scale"]')?.value === '1.5'
+      && parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-20')) === 30`,
+    '150 percent interface scale',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="help"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('#main-help-tour'))`,
+    'main help tour at 150 percent scale',
+  )
+  for (let expectedStep = 2; expectedStep <= 9; expectedStep += 1) {
+    await runIn(mainWindow, `document.querySelector('#main-help-tour .help-tour-next')?.click()`)
+    await waitForRenderer(
+      mainWindow,
+      `document.querySelector('#main-help-tour .help-tour-count')?.textContent.trim() === '${expectedStep} / 15'`,
+      `main help step ${expectedStep}`,
+    )
+  }
+  mainWindow.showInactive()
+  mainWindow.webContents.invalidate()
+  await waitForRenderer(
+    mainWindow,
+    `Number(getComputedStyle(document.querySelector('#main-help-tour')).opacity) > 0.99`,
+    'painted schedule help card at 150 percent scale',
+  )
+  const scaledScheduleHelp = await waitForRenderer(mainWindow, `(() => {
+    const card = document.querySelector('#main-help-tour')
+    const spotlight = document.querySelector('.help-tour-spotlight')
+    const exampleDisclosure = card?.querySelector('.help-example-subtask-head > span')
+    if (!card || !spotlight || !exampleDisclosure) return null
+    const bounds = card.getBoundingClientRect()
+    const style = getComputedStyle(card)
+    return {
+      count: card.querySelector('.help-tour-count')?.textContent.trim(),
+      title: card.querySelector('h2')?.textContent.trim(),
+      containsBothLabels: card.textContent.includes('간략히') && card.textContent.includes('상세히'),
+      exampleDisclosure: exampleDisclosure.textContent.trim(),
+      insideViewport: bounds.top >= 13
+        && bounds.left >= 13
+        && bounds.right <= innerWidth - 13
+        && bounds.bottom <= innerHeight - 13,
+      bottomGap: innerHeight - bounds.bottom,
+      fontScale: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-20')),
+      rendered: style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0,
+    }
+  })()`, 'contained schedule help card at 150 percent scale')
+  assert.equal(scaledScheduleHelp.count, '9 / 15')
+  assert.equal(scaledScheduleHelp.title, '오른쪽 아래에서 일정과 세부 할 일을 확인해요')
+  assert.equal(scaledScheduleHelp.fontScale, 30)
+  assert.equal(scaledScheduleHelp.rendered, true)
+  assert.equal(scaledScheduleHelp.containsBothLabels, true, 'Help must explain both compact and detailed states')
+  assert.equal(scaledScheduleHelp.exampleDisclosure, '간략히')
+  assert.equal(
+    scaledScheduleHelp.insideViewport,
+    true,
+    `Scaled schedule help card must stay inside the viewport: ${JSON.stringify(scaledScheduleHelp)}`,
+  )
+  console.log(`Scaled schedule help: ${JSON.stringify(scaledScheduleHelp)}`)
+  await sleep(100)
+  const scaledHelpImage = await mainWindow.webContents.capturePage()
+  fs.writeFileSync(path.join(outputDir, 'main-window-help-scale-150.png'), scaledHelpImage.toPNG())
+  mainWindow.hide()
+
+  await runIn(mainWindow, `document.querySelector('#main-help-tour .help-tour-close')?.click()`)
+  await waitForRenderer(mainWindow, `!document.querySelector('#main-help-tour')`, 'closed scaled help tour')
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="appearance"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="appearance-panel"]'))`,
+    'appearance panel for scale reset',
+  )
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="font-scale"]', '1')`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="font-scale"]')?.value === '1'
+      && parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-20')) === 20`,
+    'reset interface scale',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="화면 설정 닫기"]')?.click()`)
+  await waitForRenderer(mainWindow, `!document.querySelector('[data-qa="appearance-panel"]')`, 'closed appearance panel')
+  mainWindow.setSize(1480, 920)
+  await waitForRenderer(
+    mainWindow,
+    `window.innerWidth >= 1400 && window.innerHeight >= 850`,
+    'restored main viewport after scaled help',
+  )
+
   const railStructure = await runIn(mainWindow, `(() => {
     const rail = document.querySelector('.side-rail')
     const primary = rail?.querySelector(':scope > nav[aria-label="주요 메뉴"]')
@@ -3157,11 +3260,11 @@ app.whenReady().then(async () => {
   )
   await runIn(
     mainWindow,
-    `window.__daylineQa.setValue('[data-qa="appearance-panel"] [data-qa="font-scale"]', '1.3')`,
+    `window.__daylineQa.setValue('[data-qa="appearance-panel"] [data-qa="font-scale"]', '1.5')`,
   )
   await waitForRenderer(
     mainWindow,
-    `getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim() === '13px'`,
+    `getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim() === '15px'`,
     'maximum font scale',
   )
   await runIn(mainWindow, `document.querySelector('[aria-label="화면 설정 닫기"]')?.click()`)
@@ -3352,11 +3455,11 @@ app.whenReady().then(async () => {
     })()
   `)
   assert.ok(minimumLayout, 'Minimum-size sidebar elements must render')
-  assert.equal(minimumLayout.fontToken, '13px', 'Minimum-size QA must run at 130% font scale')
+  assert.equal(minimumLayout.fontToken, '15px', 'Minimum-size QA must run at 150% font scale')
   assert.equal(
     minimumLayout.viewportCovered,
     true,
-    `130% layout must cover the minimum viewport: ${JSON.stringify(minimumLayout)}`,
+    `150% layout must cover the minimum viewport: ${JSON.stringify(minimumLayout)}`,
   )
   assert.equal(minimumLayout.usable, true, 'Both sidebar halves need usable minimum height')
   assert.equal(minimumLayout.separated, true, 'Sidebar halves must not overlap')
@@ -3516,7 +3619,7 @@ app.whenReady().then(async () => {
   await reloadRenderer(widgetWindow)
   await waitForRenderer(
     widgetWindow,
-    `getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim() === '13px'
+    `getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim() === '15px'
       && document.querySelector('[data-qa="widget-splitter"]')?.getAttribute('aria-valuenow') === '80'`,
     'maximum font scale and split persistence in widget',
   )
@@ -3607,7 +3710,7 @@ app.whenReady().then(async () => {
   const compactWidgetLayout = await inspectWidgetLayout(390, 620)
   assert.ok(compactWidgetLayout, '390x620 widget layout must render')
   const compactWidgetDiagnostic = JSON.stringify(compactWidgetLayout)
-  assert.equal(compactWidgetLayout.fontToken, '13px', compactWidgetDiagnostic)
+  assert.equal(compactWidgetLayout.fontToken, '15px', compactWidgetDiagnostic)
   assert.equal(compactWidgetLayout.rootCovered, true, compactWidgetDiagnostic)
   assert.equal(compactWidgetLayout.shellContained, true, compactWidgetDiagnostic)
   assert.equal(compactWidgetLayout.panesUsable, true, compactWidgetDiagnostic)
@@ -3624,11 +3727,11 @@ app.whenReady().then(async () => {
   const minimumWidgetLayout = await inspectWidgetLayout(320, 420)
   assert.ok(minimumWidgetLayout, '320x420 widget layout must render')
   const minimumWidgetDiagnostic = JSON.stringify(minimumWidgetLayout)
-  assert.equal(minimumWidgetLayout.fontToken, '13px', minimumWidgetDiagnostic)
+  assert.equal(minimumWidgetLayout.fontToken, '15px', minimumWidgetDiagnostic)
   assert.equal(
     minimumWidgetLayout.rootCovered,
     true,
-    `130% widget root must cover the minimum viewport: ${JSON.stringify(minimumWidgetLayout)}`,
+    `150% widget root must cover the minimum viewport: ${JSON.stringify(minimumWidgetLayout)}`,
   )
   assert.equal(minimumWidgetLayout.shellContained, true, minimumWidgetDiagnostic)
   assert.equal(minimumWidgetLayout.panesUsable, true, minimumWidgetDiagnostic)

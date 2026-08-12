@@ -4,7 +4,7 @@ const { DatabaseSync } = require('node:sqlite')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
 const STORE_VERSION = 1
 const TASK_COLORS = new Set(['coral', 'violet', 'sage', 'blue', 'amber'])
 const DEFAULT_APP_SETTINGS = Object.freeze({
@@ -285,7 +285,7 @@ function sanitizeSettings(settings) {
   return {
     sidebarSplit: clampNumber(value.sidebarSplit, 20, 80, DEFAULT_APP_SETTINGS.sidebarSplit),
     widgetSplit: clampNumber(value.widgetSplit, 20, 80, DEFAULT_APP_SETTINGS.widgetSplit),
-    fontScale: clampNumber(value.fontScale, 0.85, 1.3, DEFAULT_APP_SETTINGS.fontScale),
+    fontScale: clampNumber(value.fontScale, 0.85, 1.5, DEFAULT_APP_SETTINGS.fontScale),
     themeColor: normalizeHex(value.themeColor, DEFAULT_APP_SETTINGS.themeColor),
   }
 }
@@ -892,6 +892,35 @@ function createSchema(database, appliedAt) {
         ON CONFLICT(version) DO NOTHING
       `).run(appliedAt)
       database.exec('PRAGMA user_version = 3')
+    })
+  }
+
+  if (currentVersion < 4) {
+    inTransaction(database, () => {
+      database.exec(`
+        ALTER TABLE app_settings RENAME TO app_settings_v3;
+        CREATE TABLE app_settings (
+          profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+          sidebar_split REAL NOT NULL CHECK (sidebar_split BETWEEN 20 AND 80),
+          widget_split REAL NOT NULL CHECK (widget_split BETWEEN 20 AND 80),
+          font_scale REAL NOT NULL CHECK (font_scale BETWEEN 0.85 AND 1.5),
+          theme_color TEXT NOT NULL CHECK (
+            length(theme_color) = 7 AND theme_color GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+          ),
+          updated_at TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO app_settings (
+          profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
+        )
+        SELECT profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
+        FROM app_settings_v3;
+        DROP TABLE app_settings_v3;
+      `)
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (4, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 4')
     })
   }
 }

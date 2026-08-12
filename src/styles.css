@@ -3504,6 +3504,20 @@ input[type="color"]:focus-visible {
 
 .help-example-subtasks { display: flex; flex-direction: column; gap: 5px; }
 .help-example-subtasks > strong { margin-bottom: 2px; }
+.help-example-subtask-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+.help-example-subtask-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 4px 7px;
+  border: 1px solid #d7e0d9;
+  border-radius: 7px;
+  background: white;
+  color: var(--green);
+  font-weight: 800;
+  white-space: nowrap;
+}
+.help-example-subtask-head svg { flex: 0 0 auto; }
 .help-example-subtasks > span { display: flex; align-items: center; gap: 6px; }
 .help-example-subtasks i {
   display: grid;

@@ -35,22 +35,28 @@ interface CardPosition {
   left: number
 }
 
+interface CardSize {
+  width: number
+  height: number
+}
+
 const GAP = 18
 const EDGE = 14
-const ESTIMATED_CARD_HEIGHT = 290
+const FALLBACK_CARD_SIZE: CardSize = { width: 360, height: 290 }
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), Math.max(minimum, maximum))
 }
 
-function getCardPosition(rect: HighlightRect | null): CardPosition {
+function getCardPosition(rect: HighlightRect | null, measuredSize?: CardSize): CardPosition {
   const viewportWidth = window.innerWidth
   const viewportHeight = window.innerHeight
-  const cardWidth = Math.min(360, viewportWidth - EDGE * 2)
+  const cardWidth = Math.min(measuredSize?.width ?? FALLBACK_CARD_SIZE.width, viewportWidth - EDGE * 2)
+  const cardHeight = Math.min(measuredSize?.height ?? FALLBACK_CARD_SIZE.height, viewportHeight - EDGE * 2)
 
   if (!rect) {
     return {
-      top: Math.max(EDGE, (viewportHeight - ESTIMATED_CARD_HEIGHT) / 2),
+      top: Math.max(EDGE, (viewportHeight - cardHeight) / 2),
       left: Math.max(EDGE, (viewportWidth - cardWidth) / 2),
     }
   }
@@ -62,29 +68,31 @@ function getCardPosition(rect: HighlightRect | null): CardPosition {
     top: rect.top,
   }
   const horizontalFits = cardWidth + GAP
-  const verticalFits = ESTIMATED_CARD_HEIGHT + GAP
+  const verticalFits = cardHeight + GAP
+  const maximumTop = viewportHeight - cardHeight - EDGE
+  const maximumLeft = viewportWidth - cardWidth - EDGE
 
   if (spaces.right >= horizontalFits) {
     return {
-      top: clamp(rect.top + rect.height / 2 - ESTIMATED_CARD_HEIGHT / 2, EDGE, viewportHeight - ESTIMATED_CARD_HEIGHT - EDGE),
-      left: rect.left + rect.width + GAP,
+      top: clamp(rect.top + rect.height / 2 - cardHeight / 2, EDGE, maximumTop),
+      left: clamp(rect.left + rect.width + GAP, EDGE, maximumLeft),
     }
   }
   if (spaces.left >= horizontalFits) {
     return {
-      top: clamp(rect.top + rect.height / 2 - ESTIMATED_CARD_HEIGHT / 2, EDGE, viewportHeight - ESTIMATED_CARD_HEIGHT - EDGE),
-      left: rect.left - cardWidth - GAP,
+      top: clamp(rect.top + rect.height / 2 - cardHeight / 2, EDGE, maximumTop),
+      left: clamp(rect.left - cardWidth - GAP, EDGE, maximumLeft),
     }
   }
   if (spaces.bottom >= verticalFits || spaces.bottom >= spaces.top) {
     return {
-      top: clamp(rect.top + rect.height + GAP, EDGE, viewportHeight - ESTIMATED_CARD_HEIGHT - EDGE),
-      left: clamp(rect.left + rect.width / 2 - cardWidth / 2, EDGE, viewportWidth - cardWidth - EDGE),
+      top: clamp(rect.top + rect.height + GAP, EDGE, maximumTop),
+      left: clamp(rect.left + rect.width / 2 - cardWidth / 2, EDGE, maximumLeft),
     }
   }
   return {
-    top: clamp(rect.top - ESTIMATED_CARD_HEIGHT - GAP, EDGE, viewportHeight - ESTIMATED_CARD_HEIGHT - EDGE),
-    left: clamp(rect.left + rect.width / 2 - cardWidth / 2, EDGE, viewportWidth - cardWidth - EDGE),
+    top: clamp(rect.top - cardHeight - GAP, EDGE, maximumTop),
+    left: clamp(rect.left + rect.width / 2 - cardWidth / 2, EDGE, maximumLeft),
   }
 }
 
@@ -140,32 +148,46 @@ export function HelpTour({
     if (!open || !step) return
 
     const updatePosition = () => {
+      const measuredSize = dialogRef.current
+        ? { width: dialogRef.current.offsetWidth, height: dialogRef.current.offsetHeight }
+        : undefined
       const target = step.target
         ? document.querySelector<HTMLElement>(`[data-help-id="${step.target}"]`)
         : null
       if (!target) {
         setHighlight(null)
-        setCardPosition(getCardPosition(null))
+        setCardPosition(getCardPosition(null, measuredSize))
         return
       }
 
       const bounds = target.getBoundingClientRect()
       const padding = window.innerWidth < 500 ? 4 : 7
+      const top = Math.max(4, bounds.top - padding)
+      const left = Math.max(4, bounds.left - padding)
+      const right = Math.min(window.innerWidth - 4, bounds.right + padding)
+      const bottom = Math.min(window.innerHeight - 4, bounds.bottom + padding)
       const rect = {
-        top: Math.max(4, bounds.top - padding),
-        left: Math.max(4, bounds.left - padding),
-        width: Math.min(window.innerWidth - 8, bounds.width + padding * 2),
-        height: Math.min(window.innerHeight - 8, bounds.height + padding * 2),
+        top,
+        left,
+        width: Math.max(0, right - left),
+        height: Math.max(0, bottom - top),
       }
       setHighlight(rect)
-      setCardPosition(getCardPosition(rect))
+      setCardPosition(getCardPosition(rect, measuredSize))
     }
 
     updatePosition()
     const delayedUpdate = window.setTimeout(updatePosition, 180)
+    const resizeObserver = new ResizeObserver(updatePosition)
+    if (dialogRef.current) resizeObserver.observe(dialogRef.current)
+    const target = step.target
+      ? document.querySelector<HTMLElement>(`[data-help-id="${step.target}"]`)
+      : null
+    if (target) resizeObserver.observe(target)
     window.addEventListener('resize', updatePosition)
     return () => {
       window.clearTimeout(delayedUpdate)
+      resizeObserver.disconnect()
       window.removeEventListener('resize', updatePosition)
     }
   }, [open, step])

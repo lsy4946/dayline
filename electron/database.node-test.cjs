@@ -501,7 +501,7 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   let store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 3)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 4)
   assert.deepEqual(store.tasks.map((task) => task.id), ['v1-task'])
   assert.deepEqual(store.tasks[0].subTasks, [])
   assert.equal(store.tasks[0].startDate, store.tasks[0].dueDate)
@@ -519,10 +519,11 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM sync_outbox WHERE mutation_id = 'v1-outbox'`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 2`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 3`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4`).get().count, 1)
   inspected.close()
 })
 
-test('upgrades a v2 database to v3 without demos and assigns deterministic ranges, tags, and positions', (t) => {
+test('upgrades a v2 database to v4 without demos and assigns deterministic ranges, tags, and positions', (t) => {
   const paths = tempPaths(t)
   const sqlite = new DatabaseSync(paths.databasePath)
   sqlite.exec(`
@@ -586,7 +587,7 @@ test('upgrades a v2 database to v3 without demos and assigns deterministic range
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   const store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 3)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 4)
   assert.deepEqual(store.tasks.map(({ id, position }) => ({ id, position })), [
     { id: 'v2-first', position: 0 },
     { id: 'v2-later', position: 1 },
@@ -861,7 +862,7 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
   assert.deepEqual(store.settings, {
     sidebarSplit: 20,
     widgetSplit: 80,
-    fontScale: 1.3,
+    fontScale: 1.5,
     themeColor: '#ABCDEF',
   })
   assert.deepEqual(store.taskTemplates, [template])

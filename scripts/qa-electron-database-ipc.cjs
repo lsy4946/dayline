@@ -627,7 +627,7 @@ app.whenReady().then(async () => {
 
   assert.equal(fs.existsSync(path.join(qaDirectory, 'dayline.db')), true)
   const inspected = new DatabaseSync(path.join(qaDirectory, 'dayline.db'), { readOnly: true })
-  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 3)
+  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 4)
   assert.equal(inspected.prepare('PRAGMA quick_check').get().quick_check, 'ok')
   assert.deepEqual(inspected.prepare('PRAGMA foreign_key_check').all(), [])
   assert.ok(inspected.prepare(`SELECT COUNT(*) AS count FROM sub_tasks`).get().count >= 152)
