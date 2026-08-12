@@ -22,4 +22,15 @@ contextBridge.exposeInMainWorld('dayline', {
     ipcRenderer.on('dayline:data-changed', listener)
     return () => ipcRenderer.removeListener('dayline:data-changed', listener)
   },
+  updates: {
+    getState: () => ipcRenderer.invoke('dayline:update-get-state'),
+    check: () => ipcRenderer.invoke('dayline:update-check'),
+    download: () => ipcRenderer.invoke('dayline:update-download'),
+    install: () => ipcRenderer.invoke('dayline:update-install'),
+    onStateChanged: (callback) => {
+      const listener = (_event, state) => callback(state)
+      ipcRenderer.on('dayline:update-state', listener)
+      return () => ipcRenderer.removeListener('dayline:update-state', listener)
+    },
+  },
 })

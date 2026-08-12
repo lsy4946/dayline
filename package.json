@@ -1,6 +1,6 @@
 {
   "name": "dayline",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Calendar-first offline todo widget for Windows",
   "author": "Dayline",
@@ -9,17 +9,19 @@
     "dev": "concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "build": "tsc -b && vite build",
     "build:icon": "node scripts/build-icon.mjs",
-    "test": "vitest run && node --test electron/database.node-test.cjs",
+    "test": "vitest run && node --test electron/database.node-test.cjs electron/updater.node-test.cjs",
     "test:db": "node --test electron/database.node-test.cjs",
     "test:watch": "vitest",
     "qa:capture": "npm run build && electron scripts/capture-electron.cjs",
     "qa:database": "electron scripts/check-electron-database.cjs && electron scripts/qa-electron-database-ipc.cjs",
+    "qa:update": "npm run build && electron scripts/qa-updater-renderer.cjs",
     "dist:setup": "npm run build && electron-builder --win nsis --x64 --config.win.artifactName=Dayline-Setup-${version}-${arch}.${ext}",
     "dist:win": "npm run build && electron-builder --win nsis --x64 --config.win.artifactName=Dayline-Setup-${version}-${arch}.${ext} && electron-builder --win portable --x64 --config.win.artifactName=Dayline-Portable-${version}-${arch}.${ext}",
     "preview": "vite preview"
   },
   "dependencies": {
     "@hyunbinseo/holidays-kr": "5.2027.1",
+    "electron-updater": "6.8.9",
     "lucide-react": "1.31.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
@@ -54,14 +56,19 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "verifyUpdateCodeSignature": false,
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -73,8 +80,20 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Dayline",
-      "installerLanguages": ["ko_KR", "en_US"],
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "ko_KR",
+        "en_US"
+      ],
       "language": "1042"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lsy4946",
+        "repo": "dayline",
+        "releaseType": "release"
+      }
+    ]
   }
 }

@@ -4,6 +4,7 @@ import { createBuiltInTaskTags, DEFAULT_APP_SETTINGS, saveStore } from '../lib/s
 import {
   advanceTaskState,
   isRecoverable,
+  moveTaskRange,
   purgeExpired,
   reorderPositioned,
   restoreTask,
@@ -202,6 +203,67 @@ describe('inclusive task ranges', () => {
   it('detects range overlap at a shared boundary', () => {
     expect(taskOverlapsRange(rangeTask, '2026-08-12', '2026-08-14')).toBe(true)
     expect(taskOverlapsRange(rangeTask, '2026-08-13', '2026-08-14')).toBe(false)
+  })
+
+  it.each([
+    ['month end', '2026-01-30', '2026-02-01'],
+    ['year end', '2026-12-31', '2027-01-02'],
+    ['leap day', '2028-02-28', '2028-03-01'],
+  ])('moves an inclusive three-day range across %s', (_boundary, targetStart, expectedDueDate) => {
+    const moved = moveTaskRange(
+      [rangeTask],
+      rangeTask.id,
+      targetStart,
+      new Date('2026-08-10T06:00:00.000Z'),
+    )
+
+    expect(moved[0].startDate).toBe(targetStart)
+    expect(moved[0].dueDate).toBe(expectedDueDate)
+    expect(inclusiveDateKeys(moved[0].startDate, moved[0].dueDate)).toHaveLength(3)
+  })
+
+  it('changes only the date range and updated timestamp', () => {
+    const peer = { ...baseTask, id: 'peer', position: 8 }
+    const task = {
+      ...rangeTask,
+      note: '보존할 메모',
+      dueTime: '14:30',
+      color: 'violet' as const,
+      tagId: 'builtin-violet',
+      position: 7,
+      completed: true,
+      completedAt: '2026-08-10T04:00:00.000Z',
+      previousCompleted: false,
+      subTasks,
+    }
+    const tasks = [task, peer]
+    const moved = moveTaskRange(tasks, task.id, '2026-09-20', new Date('2026-09-01T05:00:00.000Z'))
+    const { startDate: _oldStart, dueDate: _oldDue, updatedAt: _oldUpdated, ...oldFields } = task
+    const { startDate, dueDate, updatedAt, ...movedFields } = moved[0]
+
+    expect(moved).not.toBe(tasks)
+    expect(moved[0]).not.toBe(task)
+    expect(moved[1]).toBe(peer)
+    expect({ startDate, dueDate, updatedAt }).toEqual({
+      startDate: '2026-09-20',
+      dueDate: '2026-09-22',
+      updatedAt: '2026-09-01T05:00:00.000Z',
+    })
+    expect(movedFields).toEqual(oldFields)
+    expect(moved[0].subTasks).toBe(subTasks)
+  })
+
+  it('preserves array and row identities for same-start, missing, deleted, and invalid moves', () => {
+    const tasks = [rangeTask]
+    expect(moveTaskRange(tasks, rangeTask.id, rangeTask.startDate)).toBe(tasks)
+    expect(moveTaskRange(tasks, 'missing', '2026-09-01')).toBe(tasks)
+
+    const deleted = { ...rangeTask, deletedAt: '2026-08-13T00:00:00.000Z' }
+    const deletedTasks = [deleted]
+    expect(moveTaskRange(deletedTasks, deleted.id, '2026-09-01')).toBe(deletedTasks)
+    expect(moveTaskRange(tasks, rangeTask.id, '2026-02-30')).toBe(tasks)
+    expect(tasks[0]).toBe(rangeTask)
+    expect(deletedTasks[0]).toBe(deleted)
   })
 })
 describe('30 day recovery window', () => {

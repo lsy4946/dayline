@@ -1,5 +1,11 @@
 import type { Task } from '../types'
-import { dateRangeContains, dateRangesOverlap } from './date'
+import {
+  addDaysKey,
+  dateRangeContains,
+  dateRangesOverlap,
+  inclusiveDateKeys,
+  isDateKey,
+} from './date'
 
 export const RETENTION_DAYS = 30
 export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
@@ -44,6 +50,27 @@ export function taskOccursOnDate(task: Task, dateKey: string): boolean {
 
 export function taskOverlapsRange(task: Task, startDate: string, endDate: string): boolean {
   return dateRangesOverlap(task.startDate, task.dueDate, startDate, endDate)
+}
+
+export function moveTaskRange(
+  tasks: Task[],
+  taskId: string,
+  targetStart: string,
+  now = new Date(),
+): Task[] {
+  const target = tasks.find((task) => task.id === taskId && !task.deletedAt)
+  if (!target || target.startDate === targetStart || !isDateKey(targetStart)) return tasks
+
+  const durationDays = inclusiveDateKeys(target.startDate, target.dueDate).length
+  if (durationDays === 0) return tasks
+
+  const moved: Task = {
+    ...target,
+    startDate: targetStart,
+    dueDate: addDaysKey(targetStart, durationDays - 1),
+    updatedAt: now.toISOString(),
+  }
+  return tasks.map((task) => task === target ? moved : task)
 }
 
 export function reorderPositioned<T extends { id: string; position: number; updatedAt: string }>(

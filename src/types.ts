@@ -157,6 +157,46 @@ export interface WidgetState {
   locked: boolean
 }
 
+export type UpdateStatus =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'error'
+
+export type UpdateUnsupportedReason =
+  | 'qa'
+  | 'development'
+  | 'platform'
+  | 'portable'
+  | 'not-installed'
+
+export interface UpdateState {
+  status: UpdateStatus
+  currentVersion: string
+  availableVersion: string | null
+  releaseName: string | null
+  releaseNotes: string | null
+  progress: number | null
+  error: string | null
+  unsupportedReason: UpdateUnsupportedReason | null
+  canCheck: boolean
+  canDownload: boolean
+  canInstall: boolean
+}
+
+export interface DaylineUpdateApi {
+  getState: () => Promise<UpdateState>
+  check: () => Promise<UpdateState>
+  download: () => Promise<UpdateState>
+  install: () => Promise<UpdateState>
+  onStateChanged: (callback: (state: UpdateState) => void) => () => void
+}
+
 export interface DaylineDesktopApi {
   isDesktop: true
   loadData: () => Promise<DaylineStore>
@@ -169,6 +209,7 @@ export interface DaylineDesktopApi {
   openMainWindow: () => Promise<boolean>
   getWidgetState: () => Promise<WidgetState>
   onDataChanged: (callback: (store: DaylineStore) => void) => () => void
+  updates: DaylineUpdateApi
 }
 
 declare global {

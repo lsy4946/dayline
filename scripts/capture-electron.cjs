@@ -110,11 +110,15 @@ async function installQaHelpers(window) {
           const target = document.querySelector(targetSelector)
           if (!source || !target) return false
           const dataTransfer = new DataTransfer()
+          const sourceBounds = source.getBoundingClientRect()
           const targetBounds = target.getBoundingClientRect()
+          const sourceX = sourceBounds.left + sourceBounds.width / 2
+          const sourceY = sourceBounds.top + sourceBounds.height / 2
           const clientX = targetBounds.left + targetBounds.width / 2
           const clientY = targetBounds.top + targetBounds.height / 2
           source.dispatchEvent(new DragEvent('dragstart', {
             bubbles: true, cancelable: true, dataTransfer,
+            clientX: sourceX, clientY: sourceY,
           }))
           target.dispatchEvent(new DragEvent('dragenter', {
             bubbles: true, cancelable: true, dataTransfer, clientX, clientY,
@@ -129,6 +133,128 @@ async function installQaHelpers(window) {
             bubbles: true, cancelable: true, dataTransfer,
           }))
           return true
+        },
+        dragTaskDate: (taskId, sourceDate, targetDate, targetTaskId = null) => {
+          const sourceSegment = [...document.querySelectorAll(
+            '[data-qa="calendar-task-segment"][data-task-id="' + CSS.escape(taskId) + '"]',
+          )].find((segment) => segment.dataset.segmentStart <= sourceDate
+            && segment.dataset.segmentEnd >= sourceDate)
+          const source = sourceSegment?.querySelector('[data-qa="calendar-task-date-drag"]')
+          const sourceCell = document.querySelector(
+            '[data-calendar-drop-target][data-date="' + CSS.escape(sourceDate) + '"]',
+          )
+          const targetCell = document.querySelector(
+            '[data-calendar-drop-target][data-date="' + CSS.escape(targetDate) + '"]',
+          )
+          const targetSegment = targetTaskId
+            ? [...document.querySelectorAll(
+              '[data-qa="calendar-task-segment"][data-task-id="' + CSS.escape(targetTaskId) + '"]',
+            )].find((segment) => segment.dataset.segmentStart <= targetDate
+              && segment.dataset.segmentEnd >= targetDate)
+            : null
+          const target = targetSegment || targetCell
+          if (!source || !sourceCell || !targetCell || !target) return null
+          const sourceBounds = source.getBoundingClientRect()
+          const sourceCellBounds = sourceCell.getBoundingClientRect()
+          const targetBounds = target.getBoundingClientRect()
+          const targetCellBounds = targetCell.getBoundingClientRect()
+          const start = {
+            x: sourceCellBounds.left + sourceCellBounds.width / 2,
+            y: sourceBounds.top + sourceBounds.height / 2,
+          }
+          const finish = {
+            x: targetCellBounds.left + targetCellBounds.width / 2,
+            y: targetSegment
+              ? targetBounds.top + targetBounds.height / 2
+              : targetCellBounds.top + targetCellBounds.height / 2,
+          }
+          const dataTransfer = new DataTransfer()
+          source.dispatchEvent(new DragEvent('dragstart', {
+            bubbles: true, cancelable: true, dataTransfer,
+            clientX: start.x, clientY: start.y,
+          }))
+          target.dispatchEvent(new DragEvent('dragenter', {
+            bubbles: true, cancelable: true, dataTransfer,
+            clientX: finish.x, clientY: finish.y,
+          }))
+          target.dispatchEvent(new DragEvent('dragover', {
+            bubbles: true, cancelable: true, dataTransfer,
+            clientX: finish.x, clientY: finish.y,
+          }))
+          target.dispatchEvent(new DragEvent('drop', {
+            bubbles: true, cancelable: true, dataTransfer,
+            clientX: finish.x, clientY: finish.y,
+          }))
+          source.dispatchEvent(new DragEvent('dragend', {
+            bubbles: true, cancelable: true, dataTransfer,
+            clientX: finish.x, clientY: finish.y,
+          }))
+          return {
+            taskId,
+            sourceDate,
+            targetDate,
+            targetTaskId,
+            types: [...dataTransfer.types],
+            sourceHitTaskId: document.elementFromPoint(start.x, start.y)
+              ?.closest('[data-task-id]')?.dataset.taskId ?? null,
+            targetHitDate: document.elementFromPoint(finish.x, finish.y)
+              ?.closest('[data-date]')?.dataset.date ?? targetDate,
+          }
+        },
+        dragTemplateToCalendarHit: async (templateId, date) => {
+          const card = document.querySelector(
+            '[data-template-id="' + CSS.escape(templateId) + '"]',
+          )
+          const source = card?.querySelector('[data-qa="template-calendar-drag-source"]')
+          const cell = document.querySelector(
+            '[data-calendar-drop-target][data-date="' + CSS.escape(date) + '"]',
+          )
+          const panel = document.querySelector('[data-qa="template-panel"]')
+          const calendar = document.querySelector('.calendar-workspace')
+          if (!source || !cell || !panel || !calendar) return null
+          const sourceBounds = source.getBoundingClientRect()
+          const cellBounds = cell.getBoundingClientRect()
+          const dataTransfer = new DataTransfer()
+          source.dispatchEvent(new DragEvent('dragstart', {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer,
+            clientX: sourceBounds.left + sourceBounds.width / 2,
+            clientY: sourceBounds.top + sourceBounds.height / 2,
+          }))
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+          await new Promise((resolve) => setTimeout(resolve, 180))
+          const clientX = cellBounds.left + cellBounds.width / 2
+          const clientY = cellBounds.top + cellBounds.height / 2
+          const hit = document.elementFromPoint(clientX, clientY)
+          const panelBounds = panel.getBoundingClientRect()
+          const calendarBounds = calendar.getBoundingClientRect()
+          const beforeDrop = {
+            dragging: panel.dataset.calendarDragging,
+            pointerEvents: getComputedStyle(panel).pointerEvents,
+            panelRight: panelBounds.right,
+            calendarLeft: calendarBounds.left,
+            hitDate: hit?.closest('[data-date]')?.dataset.date ?? null,
+            hitInsidePanel: panel.contains(hit),
+            types: [...dataTransfer.types],
+          }
+          hit?.dispatchEvent(new DragEvent('dragenter', {
+            bubbles: true, cancelable: true, dataTransfer, clientX, clientY,
+          }))
+          hit?.dispatchEvent(new DragEvent('dragover', {
+            bubbles: true, cancelable: true, dataTransfer, clientX, clientY,
+          }))
+          hit?.dispatchEvent(new DragEvent('drop', {
+            bubbles: true, cancelable: true, dataTransfer, clientX, clientY,
+          }))
+          source.dispatchEvent(new DragEvent('dragend', {
+            bubbles: true, cancelable: true, dataTransfer, clientX, clientY,
+          }))
+          await new Promise((resolve) => requestAnimationFrame(resolve))
+          return {
+            ...beforeDrop,
+            draggingAfter: panel.dataset.calendarDragging ?? null,
+          }
         },
         selectRange: (firstDate, secondDate) => {
           const first = document.querySelector('[data-date="' + firstDate + '"]')
@@ -158,6 +284,50 @@ async function installQaHelpers(window) {
             ...common, buttons: 0, clientX: secondRect.left + 8, clientY: secondRect.top + 8,
           }))
           return true
+        },
+        selectRangeAcrossBar: (firstDate, secondDate, segmentSelector) => {
+          const first = document.querySelector(
+            '[data-calendar-drop-target][data-date="' + CSS.escape(firstDate) + '"]',
+          )
+          const second = document.querySelector(
+            '[data-calendar-drop-target][data-date="' + CSS.escape(secondDate) + '"]',
+          )
+          const segment = document.querySelector(segmentSelector)
+          if (!first || !second || !segment) return null
+          const firstRect = first.getBoundingClientRect()
+          const secondRect = second.getBoundingClientRect()
+          const segmentRect = segment.getBoundingClientRect()
+          const start = {
+            x: firstRect.left + firstRect.width / 2,
+            y: firstRect.top + 8,
+          }
+          const finish = {
+            x: secondRect.left + secondRect.width / 2,
+            y: segmentRect.top + segmentRect.height / 2,
+          }
+          const common = {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 292,
+            pointerType: 'mouse',
+            isPrimary: true,
+            button: 0,
+          }
+          first.dispatchEvent(new PointerEvent('pointerdown', {
+            ...common, buttons: 1, clientX: start.x, clientY: start.y,
+          }))
+          segment.dispatchEvent(new PointerEvent('pointermove', {
+            ...common, buttons: 1, clientX: finish.x, clientY: finish.y,
+          }))
+          window.dispatchEvent(new PointerEvent('pointerup', {
+            ...common, buttons: 0, clientX: finish.x, clientY: finish.y,
+          }))
+          return {
+            firstDate,
+            secondDate,
+            targetTaskId: document.elementFromPoint(finish.x, finish.y)
+              ?.closest('[data-task-id]')?.dataset.taskId ?? null,
+          }
         },
         scheduleIds: () => [...document.querySelectorAll(
           '[data-qa="schedule-section"] .day-task-list > .task-row[data-task-id]',
@@ -430,6 +600,185 @@ async function dragRangeAcrossCalendarBar(window, anchorDate, targetDate, segmen
   }
 }
 
+async function clickCalendarDateNative(window, date) {
+  window.show()
+  window.focus()
+  window.webContents.focus()
+  const geometry = await runIn(window, `(() => {
+    const cell = document.querySelector(
+      '[data-calendar-drop-target][data-date=${JSON.stringify(date)}]',
+    )
+    if (!cell) return null
+    const bounds = cell.getBoundingClientRect()
+    const point = {
+      x: Math.round(bounds.left + bounds.width / 2),
+      y: Math.round(bounds.top + 8),
+    }
+    return {
+      ...point,
+      hitDate: document.elementFromPoint(point.x, point.y)
+        ?.closest('[data-date]')?.dataset.date ?? null,
+    }
+  })()`)
+  assert.ok(geometry, `Calendar date ${date} must have native click geometry`)
+  assert.equal(geometry.hitDate, date, 'Native date click point must hit the requested cell')
+  window.webContents.sendInputEvent({
+    type: 'mouseMove', x: geometry.x, y: geometry.y, movementX: 0, movementY: 0,
+  })
+  window.webContents.sendInputEvent({
+    type: 'mouseDown', x: geometry.x, y: geometry.y, button: 'left', clickCount: 1,
+  })
+  window.webContents.sendInputEvent({
+    type: 'mouseUp', x: geometry.x, y: geometry.y, button: 'left', clickCount: 1,
+  })
+  await sleep(60)
+  return geometry
+}
+
+async function dragTemplateToCalendarNative(window, templateId, date) {
+  window.show()
+  window.focus()
+  window.webContents.focus()
+  await sleep(80)
+  const geometry = await runIn(window, `(() => {
+    const source = document.querySelector(
+      '[data-template-id=${JSON.stringify(templateId)}] [data-qa="template-calendar-drag-source"]',
+    )
+    const cell = document.querySelector(
+      '[data-calendar-drop-target][data-date=${JSON.stringify(date)}]',
+    )
+    if (!source || !cell) return null
+    const sourceBounds = source.getBoundingClientRect()
+    const cellBounds = cell.getBoundingClientRect()
+    window.__daylineNativeDragTrace = { dragstart: null, dragstartState: null, dragover: null, drop: null, dragend: null }
+    document.addEventListener('dragstart', (event) => {
+      window.__daylineNativeDragTrace.dragstart = {
+        at: performance.now(),
+        types: [...(event.dataTransfer?.types ?? [])],
+        templateId: event.target?.closest?.('[data-template-id]')?.dataset.templateId ?? null,
+      }
+      requestAnimationFrame(() => {
+        const panel = document.querySelector('[data-qa="template-panel"]')
+        const calendar = document.querySelector('.calendar-workspace')
+        if (!panel || !calendar) return
+        const panelBounds = panel.getBoundingClientRect()
+        window.__daylineNativeDragTrace.dragstartState = {
+          connected: panel.isConnected,
+          dragging: panel.dataset.calendarDragging ?? null,
+          pointerEvents: getComputedStyle(panel).pointerEvents,
+          opacity: getComputedStyle(panel).opacity,
+          inert: panel.inert,
+          ariaHidden: panel.getAttribute('aria-hidden'),
+          panelRight: panelBounds.right,
+          calendarLeft: calendar.getBoundingClientRect().left,
+        }
+      })
+    }, { capture: true, once: true })
+    document.addEventListener('dragover', (event) => {
+      window.__daylineNativeDragTrace.dragover = {
+        at: performance.now(),
+        date: event.target?.closest?.('[data-date]')?.dataset.date ?? null,
+        taskId: event.target?.closest?.('.calendar-task-segment')?.dataset.taskId ?? null,
+      }
+    }, { capture: true })
+    document.addEventListener('drop', (event) => {
+      window.__daylineNativeDragTrace.drop = {
+        at: performance.now(),
+        types: [...(event.dataTransfer?.types ?? [])],
+        date: event.target?.closest?.('[data-date]')?.dataset.date ?? null,
+        taskId: event.target?.closest?.('.calendar-task-segment')?.dataset.taskId ?? null,
+      }
+    }, { capture: true, once: true })
+    document.addEventListener('dragend', (event) => {
+      window.__daylineNativeDragTrace.dragend = {
+        at: performance.now(),
+        dropEffect: event.dataTransfer?.dropEffect ?? null,
+      }
+    }, { capture: true, once: true })
+    return {
+      source: {
+        x: Math.round(sourceBounds.left + sourceBounds.width / 2),
+        y: Math.round(sourceBounds.top + sourceBounds.height / 2),
+      },
+      target: {
+        x: Math.round(cellBounds.left + cellBounds.width / 2),
+        y: Math.round(cellBounds.bottom - Math.min(14, cellBounds.height / 5)),
+      },
+      sourceHitTemplate: document.elementFromPoint(
+        sourceBounds.left + sourceBounds.width / 2,
+        sourceBounds.top + sourceBounds.height / 2,
+      )?.closest('[data-template-id]')?.dataset.templateId ?? null,
+    }
+  })()`)
+  assert.ok(geometry, `Native template drag geometry must exist for ${templateId} -> ${date}`)
+  assert.equal(geometry.sourceHitTemplate, templateId, 'Native drag must begin on the template copy surface')
+
+  const debuggerClient = window.webContents.debugger
+  const attachedHere = !debuggerClient.isAttached()
+  if (attachedHere) debuggerClient.attach('1.3')
+  try {
+    await debuggerClient.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: geometry.source.x, y: geometry.source.y, button: 'none', buttons: 0,
+    })
+    await debuggerClient.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: geometry.source.x, y: geometry.source.y,
+      button: 'left', buttons: 1, clickCount: 1,
+    })
+    for (let step = 1; step <= 18; step += 1) {
+      const point = {
+        x: Math.round(geometry.source.x + ((geometry.target.x - geometry.source.x) * step) / 18),
+        y: Math.round(geometry.source.y + ((geometry.target.y - geometry.source.y) * step) / 18),
+      }
+      await debuggerClient.sendCommand('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: point.x, y: point.y, button: 'left', buttons: 1,
+      })
+      await sleep(18)
+    }
+    await sleep(180)
+    const during = await runIn(window, `(() => {
+    const panel = document.querySelector('[data-qa="template-panel"]')
+    const calendar = document.querySelector('.calendar-workspace')
+    const hit = document.elementFromPoint(${geometry.target.x}, ${geometry.target.y})
+    if (!panel || !calendar) return null
+    const panelBounds = panel.getBoundingClientRect()
+    return {
+      connected: panel.isConnected,
+      dragging: panel.dataset.calendarDragging ?? null,
+      pointerEvents: getComputedStyle(panel).pointerEvents,
+      opacity: getComputedStyle(panel).opacity,
+      inert: panel.inert,
+      ariaHidden: panel.getAttribute('aria-hidden'),
+      panelRight: panelBounds.right,
+      calendarLeft: calendar.getBoundingClientRect().left,
+      hitDate: hit?.closest('[data-date]')?.dataset.date ?? null,
+      hitTaskId: hit?.closest('.calendar-task-segment')?.dataset.taskId ?? null,
+      hitInsidePanel: panel.contains(hit),
+      trace: window.__daylineNativeDragTrace,
+    }
+    })()`)
+    await debuggerClient.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: geometry.target.x, y: geometry.target.y,
+      button: 'left', buttons: 0, clickCount: 1,
+    })
+    await sleep(260)
+    const after = await runIn(window, `(() => {
+    const panel = document.querySelector('[data-qa="template-panel"]')
+    const action = document.querySelector('[data-rail-action="templates"]')
+    if (!panel || !action) return null
+    return {
+      connected: panel.isConnected,
+      dragging: panel.dataset.calendarDragging ?? null,
+      pointerEvents: getComputedStyle(panel).pointerEvents,
+      expanded: action.getAttribute('aria-expanded'),
+      trace: window.__daylineNativeDragTrace,
+    }
+    })()`)
+    return { inputPath: 'Input.dispatchMouseEvent', geometry, during, after }
+  } finally {
+    if (attachedHere && debuggerClient.isAttached()) debuggerClient.detach()
+  }
+}
+
 async function typeAndCommit(window, selector, value) {
   window.show()
   window.focus()
@@ -697,6 +1046,19 @@ function createQaStore(today) {
         createdAt: '2026-08-11T01:30:00.000Z',
         updatedAt: '2026-08-11T01:30:00.000Z',
       },
+      {
+        id: 'qa-template-secondary',
+        title: 'QA 보조 템플릿',
+        note: '템플릿 순서 검증',
+        dueTime: null,
+        tagId: 'builtin-sage',
+        legacyColor: 'sage',
+        durationDays: 1,
+        subTaskTitles: [],
+        position: 1,
+        createdAt: '2026-08-11T01:31:00.000Z',
+        updatedAt: '2026-08-11T01:31:00.000Z',
+      },
     ],
     migrationWarning: null,
   }
@@ -791,9 +1153,20 @@ app.whenReady().then(async () => {
       const body = document.querySelector('.day-panel-body')
       const noteList = quick?.querySelector('.daily-note-list')
       const taskList = schedule?.querySelector('.day-task-list')
-      if (!quick || !schedule || !splitter || !body || !noteList || !taskList) return null
+      const quickTitle = quick?.querySelector('#daily-notes-title')
+      const quickAdd = quick?.querySelector('[data-qa="quick-note-add"]')
+        ?? quick?.querySelector('[aria-label="선택한 날짜에 퀵 노트 추가"]')
+      const quickHeading = quick?.querySelector('.panel-section-heading')
+      const quickCount = quick?.querySelector('[data-qa="quick-note-count"]')
+      const scheduleCount = schedule?.querySelector('[data-qa="schedule-count"]')
+      const scheduleAdd = schedule?.querySelector('[data-qa="schedule-add"]')
+      if (!quick || !schedule || !splitter || !body || !noteList || !taskList
+        || !quickTitle || !quickAdd || !quickHeading || !quickCount || !scheduleCount || !scheduleAdd) return null
       const quickRect = quick.getBoundingClientRect()
       const scheduleRect = schedule.getBoundingClientRect()
+      const titleRect = quickTitle.getBoundingClientRect()
+      const addRect = quickAdd.getBoundingClientRect()
+      const headingRect = quickHeading.getBoundingClientRect()
       const styleText = [...document.styleSheets].flatMap((sheet) => {
         try { return [...sheet.cssRules].map((rule) => rule.cssText) } catch { return [] }
       }).join('\\n')
@@ -811,6 +1184,25 @@ app.whenReady().then(async () => {
         hasLegacyProgress: Boolean(document.querySelector('.day-progress')),
         hasLegacyTip: Boolean(document.querySelector('.panel-tip')),
         hasLegacyCopy: document.body.innerText.includes('오늘의 흐름'),
+        quickAddByHeading: quickHeading.contains(quickAdd)
+          && addRect.left >= titleRect.right - 1
+          && addRect.top >= headingRect.top - 1
+          && addRect.bottom <= headingRect.bottom + 1,
+        quickCount: {
+          value: Number(quickCount.textContent),
+          label: quickCount.getAttribute('aria-label'),
+          rendered: noteList.querySelectorAll(':scope > [data-daily-note-id]').length,
+        },
+        scheduleCount: {
+          value: Number(scheduleCount.textContent),
+          label: scheduleCount.getAttribute('aria-label'),
+          rendered: taskList.querySelectorAll(':scope > .task-row[data-task-id]').length,
+        },
+        scheduleAddInsideHeading: schedule.closest('[data-qa="schedule-section"]')
+          ?.querySelector('.panel-section-heading')?.contains(scheduleAdd) === true,
+        hasLegacyHeaderAdd: Boolean(document.querySelector(
+          '.day-panel-header [aria-label="선택한 날짜에 퀵 노트 추가"]',
+        )),
       }
       } catch (error) {
         return { error: String(error?.stack || error) }
@@ -822,6 +1214,13 @@ app.whenReady().then(async () => {
   assert.equal(sidebarStructure.hasLegacyProgress, false, 'Legacy today progress must be removed')
   assert.equal(sidebarStructure.hasLegacyTip, false, 'Legacy sidebar tip must be removed')
   assert.equal(sidebarStructure.hasLegacyCopy, false, 'Legacy today flow copy must be removed')
+  assert.equal(sidebarStructure.quickAddByHeading, true, 'Quick-note add must sit beside the Quick Note title')
+  assert.equal(sidebarStructure.quickCount.value, sidebarStructure.quickCount.rendered)
+  assert.equal(sidebarStructure.quickCount.label, `퀵 노트 ${sidebarStructure.quickCount.rendered}개`)
+  assert.equal(sidebarStructure.scheduleCount.value, sidebarStructure.scheduleCount.rendered)
+  assert.equal(sidebarStructure.scheduleCount.label, `일정 ${sidebarStructure.scheduleCount.rendered}개`)
+  assert.equal(sidebarStructure.scheduleAddInsideHeading, true, 'Schedule add must sit in its section header')
+  assert.equal(sidebarStructure.hasLegacyHeaderAdd, false, 'Selected-day header must no longer own quick-note add')
   assert.ok(sidebarStructure.bodyHeight > 0, 'Sidebar body must have usable height')
   assert.equal(sidebarStructure.splitRole, 'separator')
   assert.equal(sidebarStructure.splitOrientation, 'horizontal')
@@ -1024,9 +1423,11 @@ app.whenReady().then(async () => {
 
   const railStructure = await runIn(mainWindow, `(() => {
     const rail = document.querySelector('.side-rail')
+    const shell = document.querySelector('.main-shell')
+    const toggle = rail?.querySelector('[data-qa="rail-brand-toggle"]')
     const primary = rail?.querySelector(':scope > nav[aria-label="주요 메뉴"]')
     const bottom = rail?.querySelector(':scope > .rail-bottom')
-    if (!rail || !primary || !bottom) return null
+    if (!rail || !shell || !toggle || !primary || !bottom) return null
     const primaryActions = [...primary.querySelectorAll(':scope > [data-rail-action]')]
     const bottomActions = [...bottom.querySelectorAll(':scope > [data-rail-action]')]
     const describe = (button) => ({
@@ -1036,21 +1437,36 @@ app.whenReady().then(async () => {
       expanded: button.getAttribute('aria-expanded'),
     })
     const railBounds = rail.getBoundingClientRect()
-    const recoveryBounds = bottomActions.find((button) => button.dataset.railAction === 'recovery')
-      ?.getBoundingClientRect()
+    const recoveryAction = bottomActions.find((button) => button.dataset.railAction === 'recovery')
+    const updateAction = bottomActions.find((button) => button.dataset.railAction === 'updates')
+    const recoveryBounds = recoveryAction?.getBoundingClientRect()
+    const updateBounds = updateAction?.getBoundingClientRect()
     const helpBounds = bottomActions.find((button) => button.dataset.railAction === 'help')
       ?.getBoundingClientRect()
     const lastPrimaryBounds = primaryActions.at(-1)?.getBoundingClientRect()
     return {
+      railState: rail.dataset.state,
+      collapsedAttribute: shell.getAttribute('data-rail-collapsed'),
+      toggle: {
+        controls: toggle.getAttribute('aria-controls'),
+        expanded: toggle.getAttribute('aria-expanded'),
+        label: toggle.getAttribute('aria-label'),
+      },
       primary: primaryActions.map(describe),
       bottom: bottomActions.map(describe),
       allActions: [...rail.querySelectorAll('[data-rail-action]')].map((button) => button.dataset.railAction),
       hasCalendarAction: Boolean(rail.querySelector('[data-rail-action="calendar"]')),
       hasOfflineDot: Boolean(rail.querySelector('.offline-dot')),
       hasLegacyStorageCopy: /(^|\\s)(LOCAL|SQLITE)(\\s|$)/.test(rail.textContent ?? ''),
-      recoveryOutsidePrimary: !primary.contains(bottomActions[0]),
+      recoveryOutsidePrimary: Boolean(recoveryAction) && !primary.contains(recoveryAction),
       recoveryBelowPrimary: Boolean(recoveryBounds && lastPrimaryBounds)
         && recoveryBounds.top >= lastPrimaryBounds.bottom,
+      updateAboveRecovery: Boolean(updateBounds && recoveryBounds)
+        && updateBounds.bottom <= recoveryBounds.top,
+      updateInsideRail: Boolean(updateBounds)
+        && updateBounds.left >= railBounds.left
+        && updateBounds.right <= railBounds.right
+        && updateBounds.bottom <= railBounds.bottom,
       recoveryInsideRail: Boolean(recoveryBounds)
         && recoveryBounds.left >= railBounds.left
         && recoveryBounds.right <= railBounds.right
@@ -1064,6 +1480,13 @@ app.whenReady().then(async () => {
     }
   })()`)
   assert.ok(railStructure, 'The redesigned rail must render primary and bottom action groups')
+  assert.equal(railStructure.railState, 'open', 'The main rail must start open')
+  assert.equal(railStructure.collapsedAttribute, null)
+  assert.deepEqual(railStructure.toggle, {
+    controls: 'side-rail-navigation',
+    expanded: 'true',
+    label: '좌측 메뉴 접기',
+  })
   assert.deepEqual(
     railStructure.primary,
     [
@@ -1077,23 +1500,366 @@ app.whenReady().then(async () => {
   assert.deepEqual(
     railStructure.bottom,
     [
+      { action: 'updates', id: 'rail-action-updates', controls: 'rail-panel-updates', expanded: 'false' },
       { action: 'recovery', id: 'rail-action-recovery', controls: 'recovery-panel', expanded: 'false' },
       { action: 'help', id: 'rail-action-help', controls: 'main-help-tour', expanded: 'false' },
     ],
-    'Recent deletion and help must keep their accessible bottom-rail order',
+    'Updates, recent deletion, and help must keep their accessible bottom-rail order',
   )
   assert.deepEqual(
     railStructure.allActions,
-    ['templates', 'filters', 'tags', 'appearance', 'recovery', 'help'],
+    ['templates', 'filters', 'tags', 'appearance', 'updates', 'recovery', 'help'],
   )
   assert.equal(railStructure.hasCalendarAction, false, 'The redundant calendar rail action must be removed')
   assert.equal(railStructure.hasOfflineDot, false, 'The legacy local-status dot must be removed')
   assert.equal(railStructure.hasLegacyStorageCopy, false, 'LOCAL/SQLITE rail copy must be removed')
   assert.equal(railStructure.recoveryOutsidePrimary, true, 'Recovery must sit outside the primary navigation')
   assert.equal(railStructure.recoveryBelowPrimary, true, 'Recovery must remain below the primary action stack')
+  assert.equal(railStructure.updateAboveRecovery, true, 'Updates must sit above recent deletion in the bottom rail')
+  assert.equal(railStructure.updateInsideRail, true, 'Updates must remain inside the rail bounds')
   assert.equal(railStructure.recoveryInsideRail, true, 'Recovery must remain inside the rail bounds')
   assert.equal(railStructure.helpBelowRecovery, true, 'Help must be the bottom-most rail action')
   assert.equal(railStructure.helpInsideRail, true, 'Help must remain inside the rail bounds')
+
+  qaStage = 'browser-update-unsupported'
+  await runIn(mainWindow, `document.querySelector('[data-qa="update-menu-button"]')?.click()`)
+  const unsupportedUpdatePanel = await waitForRenderer(mainWindow, `(() => {
+    const trigger = document.querySelector('[data-qa="update-menu-button"]')
+    const panel = document.querySelector('[data-qa="update-panel"]')
+    const status = panel?.querySelector('[data-qa="update-status"]')
+    const check = panel?.querySelector('[data-qa="update-check"]')
+    if (!trigger || !panel || !status || !check) return null
+    return {
+      expanded: trigger.getAttribute('aria-expanded'),
+      controls: trigger.getAttribute('aria-controls'),
+      panelId: panel.id,
+      labelledBy: panel.getAttribute('aria-labelledby'),
+      unsupportedStatus: status.classList.contains('status-unsupported'),
+      politeStatus: status.getAttribute('aria-live'),
+      hasUnsupportedNote: Boolean(panel.querySelector('[data-qa="update-unsupported-note"]')),
+      checkDisabled: check.disabled,
+      hasDownload: Boolean(panel.querySelector('[data-qa="update-download"]')),
+      hasInstall: Boolean(panel.querySelector('[data-qa="update-install"]')),
+      hasStartupDialog: Boolean(document.querySelector('[data-qa="update-available-dialog"]')),
+    }
+  })()`, 'unsupported browser update panel')
+  assert.deepEqual(unsupportedUpdatePanel, {
+    expanded: 'true',
+    controls: 'rail-panel-updates',
+    panelId: 'rail-panel-updates',
+    labelledBy: 'rail-action-updates',
+    unsupportedStatus: true,
+    politeStatus: 'polite',
+    hasUnsupportedNote: true,
+    checkDisabled: true,
+    hasDownload: false,
+    hasInstall: false,
+    hasStartupDialog: false,
+  }, 'Browser and unsupported builds must explain why updates cannot run without offering unsafe actions')
+  await runIn(mainWindow, `document.querySelector('[data-qa="update-panel"] .flyout-header .icon-button')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="update-panel"]')
+      && document.activeElement === document.querySelector('[data-qa="update-menu-button"]')`,
+    'unsupported update panel close and focus restoration',
+  )
+
+  qaStage = 'rail-collapse-and-reopen'
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="filters"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="filter-panel"]'))`,
+    'open filter panel before rail collapse',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="rail-brand-toggle"]')?.click()`)
+  await sleep(240)
+  const collapsedRail = await waitForRenderer(mainWindow, `(() => {
+    const shell = document.querySelector('.main-shell')
+    const rail = document.querySelector('[data-qa="side-rail"]')
+    const toggle = document.querySelector('[data-qa="rail-open-button"]')
+    const workspace = document.querySelector('.calendar-workspace')
+    const dayPanel = document.querySelector('.day-panel')
+    if (!shell || !rail || !toggle || !workspace || !dayPanel) return null
+    const rect = (element) => {
+      const bounds = element.getBoundingClientRect()
+      return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }
+    }
+    return {
+      state: rail.dataset.state,
+      collapsed: shell.dataset.railCollapsed,
+      expanded: toggle.getAttribute('aria-expanded'),
+      label: toggle.getAttribute('aria-label'),
+      railHidden: rail.hidden,
+      flyoutClosed: !document.querySelector('.rail-flyout'),
+      recoveryClosed: !document.querySelector('[data-qa="recovery-panel"]'),
+      rail: rect(rail),
+      toggle: rect(toggle),
+      workspace: rect(workspace),
+      dayPanel: rect(dayPanel),
+      noPageOverflow: document.documentElement.scrollWidth <= innerWidth + 1
+        && document.documentElement.scrollHeight <= innerHeight + 1,
+    }
+  })()`, 'collapsed main rail')
+  assert.deepEqual(
+    {
+      state: collapsedRail.state,
+      collapsed: collapsedRail.collapsed,
+      expanded: collapsedRail.expanded,
+      label: collapsedRail.label,
+      railHidden: collapsedRail.railHidden,
+      flyoutClosed: collapsedRail.flyoutClosed,
+      recoveryClosed: collapsedRail.recoveryClosed,
+      noPageOverflow: collapsedRail.noPageOverflow,
+    },
+    {
+      state: 'closed',
+      collapsed: 'true',
+      expanded: 'false',
+      label: '좌측 메뉴 열기',
+      railHidden: true,
+      flyoutClosed: true,
+      recoveryClosed: true,
+      noPageOverflow: true,
+    },
+    `Rail collapse must hide its groups and close overlays: ${JSON.stringify(collapsedRail)}`,
+  )
+  assert.ok(
+    collapsedRail.toggle.left >= collapsedRail.workspace.left - 1
+      && collapsedRail.toggle.right <= collapsedRail.workspace.right + 1
+      && collapsedRail.workspace.left >= collapsedRail.rail.right - 1
+      && collapsedRail.workspace.right <= collapsedRail.dayPanel.left + 1,
+    `Collapsed rail columns must remain separated: ${JSON.stringify(collapsedRail)}`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="rail-open-button"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="side-rail"]')?.dataset.state === 'open'
+      && !document.querySelector('[data-qa="side-rail"]')?.hidden
+      && document.activeElement === document.querySelector('[data-qa="rail-brand-toggle"]')`,
+    'reopened main rail',
+  )
+
+  qaStage = 'create-outside-click-confirm'
+  const taskCountBeforeOutsideCreate = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length ?? -1`,
+  )
+  await runIn(mainWindow, `(() => {
+    const trigger = document.querySelector('.header-add')
+    trigger?.focus()
+    trigger?.click()
+    return Boolean(trigger)
+  })()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="task-modal"]')?.dataset.mode === 'create'
+      && document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'false'`,
+    'clean create modal',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && !document.querySelector('[data-qa="unsaved-task-confirm"]')
+      && document.activeElement === document.querySelector('.header-add')`,
+    'clean outside click closes without prompt and restores focus',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length`),
+    taskCountBeforeOutsideCreate,
+    'Closing an untouched create modal must not add a task',
+  )
+
+  await runIn(mainWindow, `(() => {
+    const trigger = document.querySelector('.header-add')
+    trigger?.focus()
+    trigger?.click()
+    return Boolean(trigger)
+  })()`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="task-modal"]'))`, 'invalid dirty create modal')
+  await runIn(
+    mainWindow,
+    `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="일정 메모"]', '제목 없는 저장 불가 초안')`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'true'`,
+    'invalid create draft becomes dirty',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')?.focus()`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const invalidUnsaved = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-task-confirm"]')
+    const modal = document.querySelector('[data-qa="task-modal"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-task-save"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !modal || !save || !continueButton) return null
+    return {
+      role: prompt.getAttribute('role'),
+      modal: prompt.getAttribute('aria-modal'),
+      text: prompt.querySelector('#unsaved-task-description')?.textContent?.trim(),
+      saveDisabled: save.disabled,
+      taskModalInert: modal.inert,
+      outsideModalInert: [...(document.querySelector('[data-qa="task-modal-backdrop"]')?.parentElement?.children ?? [])]
+        .filter((element) => !element.contains(prompt))
+        .every((element) => element.inert === true),
+      focusOnContinue: document.activeElement === continueButton,
+    }
+  })()`, 'invalid unsaved prompt')
+  assert.deepEqual(invalidUnsaved, {
+    role: 'alertdialog',
+    modal: 'true',
+    text: '변경 사항이 있습니다. 저장하시겠습니까?',
+    saveDisabled: true,
+    taskModalInert: true,
+    outsideModalInert: true,
+    focusOnContinue: true,
+  })
+  assert.equal(
+    await runIn(mainWindow, `window.__daylineQa.key('[data-qa="unsaved-task-confirm"] [aria-label="계속 작성"]', 'Tab', { shiftKey: true })`),
+    true,
+  )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `document.activeElement === document.querySelector('[data-qa="unsaved-task-discard"]')`,
+    ),
+    true,
+    'Invalid prompt Shift+Tab must wrap from Continue to Discard while Save is disabled',
+  )
+  assert.equal(
+    await runIn(mainWindow, `window.__daylineQa.key('[data-qa="unsaved-task-discard"]', 'Tab')`),
+    true,
+  )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `document.activeElement === document.querySelector('[data-qa="unsaved-task-confirm"] [aria-label="계속 작성"]')`,
+    ),
+    true,
+    'Invalid prompt Tab must wrap back to Continue',
+  )
+  await runIn(mainWindow, `window.__daylineQa.key('[data-qa="unsaved-task-confirm"] [aria-label="계속 작성"]', 'Escape')`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="unsaved-task-confirm"]')
+      && document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'true'
+      && document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')?.value === '제목 없는 저장 불가 초안'
+      && document.activeElement === document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')`,
+    'Escape returns to preserved dirty draft',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="unsaved-task-confirm"]'))`, 'reopened invalid unsaved prompt')
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-task-discard"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && !document.querySelector('[data-qa="unsaved-task-confirm"]')
+      && document.activeElement === document.querySelector('.header-add')`,
+    'discard dirty create and restore trigger focus',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length`),
+    taskCountBeforeOutsideCreate,
+    'Discarding an invalid dirty draft must not add a task',
+  )
+
+  const outsideSaveTitle = 'QA 바깥 저장 일정'
+  await runIn(mainWindow, `(() => {
+    const trigger = document.querySelector('.header-add')
+    trigger?.focus()
+    trigger?.click()
+    return Boolean(trigger)
+  })()`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="task-modal"]'))`, 'valid outside-save draft')
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] .title-input', ${JSON.stringify(outsideSaveTitle)})`)
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="시작 날짜"]', '2099-12-30')`)
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="마감 날짜"]', '2099-12-31')`)
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="일정 메모"]', '바깥 클릭 저장 검증')`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal"] .time-toggle')?.click()`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="task-modal"] [aria-label="마감 시간"]'))`, 'outside-save optional time')
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="마감 시간"]', '16:40')`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal"] [data-qa="task-tag-picker"] [data-tag-id="builtin-blue"]')?.click()`)
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="subtask 추가"]', '저장과 함께 추가될 세부 일정')`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const validUnsaved = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-task-confirm"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-task-save"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !save || !continueButton || save.disabled) return null
+    return {
+      focusOnContinue: document.activeElement === continueButton,
+      taskModalInert: document.querySelector('[data-qa="task-modal"]')?.inert === true,
+    }
+  })()`, 'valid unsaved prompt')
+  assert.deepEqual(validUnsaved, { focusOnContinue: true, taskModalInert: true })
+  assert.equal(
+    await runIn(mainWindow, `window.__daylineQa.key('[data-qa="unsaved-task-confirm"] [aria-label="계속 작성"]', 'Tab', { shiftKey: true })`),
+    true,
+  )
+  assert.equal(
+    await runIn(mainWindow, `document.activeElement === document.querySelector('[data-qa="unsaved-task-save"]')`),
+    true,
+    'Valid prompt Shift+Tab must wrap to Save',
+  )
+  await runIn(mainWindow, `(() => {
+    const save = document.querySelector('[data-qa="unsaved-task-save"]')
+    save?.click()
+    save?.click()
+    return true
+  })()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && !document.querySelector('[data-qa="unsaved-task-confirm"]')`,
+    'closed task modal after outside-click save',
+  )
+  const outsideSavedTask = await runIn(mainWindow, `(() => {
+    const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+    const matches = (store?.tasks ?? []).filter((task) => task.title === ${JSON.stringify(outsideSaveTitle)})
+    const task = matches[0] ?? {}
+    return {
+      matchCount: matches.length,
+      taskCount: store?.tasks?.length ?? -1,
+      startDate: task.startDate,
+      dueDate: task.dueDate,
+      dueTime: task.dueTime,
+      note: task.note,
+      tagId: task.tagId,
+      subTasks: task.subTasks.map((subTask) => subTask.title),
+      promptOpen: Boolean(document.querySelector('[data-qa="unsaved-task-confirm"]')),
+      focusRestored: document.activeElement === document.querySelector('.header-add'),
+    }
+  })()`)
+  assert.deepEqual(outsideSavedTask, {
+    matchCount: 1,
+    taskCount: taskCountBeforeOutsideCreate + 1,
+    startDate: '2099-12-30',
+    dueDate: '2099-12-31',
+    dueTime: '16:40',
+    note: '바깥 클릭 저장 검증',
+    tagId: 'builtin-blue',
+    subTasks: ['저장과 함께 추가될 세부 일정'],
+    promptOpen: false,
+    focusRestored: true,
+  }, 'Outside-click Save must create exactly one complete task even on a repeated click')
+  await runIn(mainWindow, `document.querySelector('.today-button')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.rangeStart === ${JSON.stringify(today)}
+      && document.querySelector('[aria-label="연도 선택"]')?.value === '2026'
+      && document.querySelector('[aria-label="월 선택"]')?.value === '7'`,
+    'restore fixed month after outside-click save',
+  )
+
+  qaStage = 'split-controls'
   assert.equal(
     await runIn(
       mainWindow,
@@ -1594,6 +2360,63 @@ app.whenReady().then(async () => {
     false,
     'Dragging a date range through a task bar must not open task details',
   )
+  await clickCalendarDateNative(mainWindow, today)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.rangeStart === ${JSON.stringify(today)}
+      && document.querySelector('.calendar-grid')?.dataset.rangeEnd === ${JSON.stringify(today)}
+      && document.querySelector(
+        '[data-calendar-drop-target][data-date="${today}"]',
+      )?.classList.contains('is-selected')`,
+    'first native date click after bar range drag',
+  )
+
+  const syntheticBarRange = await runIn(
+    mainWindow,
+    `window.__daylineQa.selectRangeAcrossBar(
+      ${JSON.stringify(rangeEnd)},
+      ${JSON.stringify(sameWeekStart)},
+      '.calendar-task-segment[data-task-id="qa-span-same"]',
+    )`,
+  )
+  assert.deepEqual(
+    syntheticBarRange,
+    { firstDate: rangeEnd, secondDate: sameWeekStart, targetTaskId: 'qa-span-same' },
+    'Synthetic pointer range must end on the connected task bar',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.rangeStart === ${JSON.stringify(sameWeekStart)}
+      && document.querySelector('.calendar-grid')?.dataset.rangeEnd === ${JSON.stringify(rangeEnd)}`,
+    'synthetic date-range drag across a calendar task bar',
+  )
+  // The pointer-up reset intentionally runs in a zero-delay timer so any
+  // compatibility click in the same event turn can be ignored. A later real
+  // user click must never be consumed by the stale range guard.
+  await sleep(25)
+  const firstSyntheticClickDate = addDaysKey(today, 2)
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `(() => {
+        const cell = document.querySelector(
+          '[data-calendar-drop-target][data-date="${firstSyntheticClickDate}"]',
+        )
+        cell?.click()
+        return Boolean(cell)
+      })()`,
+    ),
+    true,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.rangeStart === ${JSON.stringify(firstSyntheticClickDate)}
+      && document.querySelector('.calendar-grid')?.dataset.rangeEnd === ${JSON.stringify(firstSyntheticClickDate)}
+      && document.querySelector(
+        '[data-calendar-drop-target][data-date="${firstSyntheticClickDate}"]',
+      )?.classList.contains('is-selected')`,
+    'first synthetic date click after bar range drag',
+  )
   await runIn(mainWindow, `document.querySelector('.today-button')?.click()`)
   await waitForRenderer(
     mainWindow,
@@ -1606,6 +2429,12 @@ app.whenReady().then(async () => {
     start: document.querySelector('.calendar-grid')?.dataset.rangeStart,
     end: document.querySelector('.calendar-grid')?.dataset.rangeEnd,
   })`)
+  const datesBeforeCalendarReorder = await runIn(mainWindow, `(() => {
+    const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+    return Object.fromEntries((store?.tasks ?? [])
+      .filter((task) => ['qa-span-same', 'qa-span-cross'].includes(task.id))
+      .map((task) => [task.id, [task.startDate, task.dueDate]]))
+  })()`)
   assert.equal(
     await runIn(
       mainWindow,
@@ -1647,6 +2476,16 @@ app.whenReady().then(async () => {
     false,
     'Calendar task reorder must not open the task modal',
   )
+  assert.deepEqual(
+    await runIn(mainWindow, `(() => {
+      const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      return Object.fromEntries((store?.tasks ?? [])
+        .filter((task) => ['qa-span-same', 'qa-span-cross'].includes(task.id))
+        .map((task) => [task.id, [task.startDate, task.dueDate]]))
+    })()`),
+    datesBeforeCalendarReorder,
+    'The calendar reorder handle must change order only, never task dates',
+  )
   await reloadRenderer(mainWindow)
   await waitForRenderer(
     mainWindow,
@@ -1661,6 +2500,164 @@ app.whenReady().then(async () => {
       )?.dataset.lane === '1'`,
     'calendar segment reorder persistence after renderer restart',
   )
+
+  qaStage = 'calendar-task-date-move'
+  const preservedTaskFields = (id) => runIn(mainWindow, `(() => {
+    const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.tasks?.find((candidate) => candidate.id === ${JSON.stringify(id)})
+    if (!task) return null
+    return {
+      title: task.title,
+      note: task.note,
+      dueTime: task.dueTime,
+      color: task.color,
+      tagId: task.tagId,
+      position: task.position,
+      completed: task.completed,
+      completedAt: task.completedAt,
+      deletedAt: task.deletedAt,
+      previousCompleted: task.previousCompleted,
+      createdAt: task.createdAt,
+      subTasks: task.subTasks.map((subTask) => ({
+        id: subTask.id,
+        title: subTask.title,
+        completed: subTask.completed,
+        completedAt: subTask.completedAt,
+        createdAt: subTask.createdAt,
+        updatedAt: subTask.updatedAt,
+      })),
+    }
+  })()`)
+  const singleMoveTarget = '2026-08-24'
+  const singleBeforeMove = await preservedTaskFields('qa-task-a')
+  const singleMoveGesture = await runIn(
+    mainWindow,
+    `window.__daylineQa.dragTaskDate('qa-task-a', ${JSON.stringify(today)}, ${JSON.stringify(singleMoveTarget)})`,
+  )
+  assert.ok(singleMoveGesture, 'Single-day calendar task body must expose a date-move drag surface')
+  assert.deepEqual(
+    singleMoveGesture.types,
+    ['application/x-dayline-task-date'],
+    'Task body drag must carry only the date-move MIME, not the order MIME',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `(() => {
+      const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.tasks?.find((candidate) => candidate.id === 'qa-task-a')
+      return task?.startDate === ${JSON.stringify(singleMoveTarget)}
+        && task?.dueDate === ${JSON.stringify(singleMoveTarget)}
+        && Boolean(document.querySelector(
+          '[data-qa="calendar-task-segment"][data-task-id="qa-task-a"][data-task-start="${singleMoveTarget}"][data-task-end="${singleMoveTarget}"]',
+        ))
+        && !document.querySelector('[data-qa="task-modal"]')
+    })()`,
+    'single-day calendar task date move',
+  )
+  assert.deepEqual(
+    await preservedTaskFields('qa-task-a'),
+    singleBeforeMove,
+    'A single-day date move must preserve order, state, metadata, and all subtasks',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector(
+      '[data-qa="calendar-task-segment"][data-task-id="qa-task-a"][data-task-start="${singleMoveTarget}"]',
+    ))`,
+    'single-day date move persistence after renderer restart',
+  )
+  assert.ok(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.dragTaskDate('qa-task-a', ${JSON.stringify(singleMoveTarget)}, ${JSON.stringify(today)})`,
+    ),
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-task-segment"][data-task-id="qa-task-a"]')
+      ?.dataset.taskStart === ${JSON.stringify(today)}`,
+    'single-day calendar task restored to its original date',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-task-segment"][data-task-id="qa-task-a"]')
+      ?.dataset.taskStart === ${JSON.stringify(today)}`,
+    'restored single-day date persists',
+  )
+
+  const multiOriginalStart = sameWeekStart
+  const multiOriginalEnd = sharedFriday
+  const multiMoveTarget = addDaysKey(today, 4)
+  const multiMoveEnd = addDaysKey(multiMoveTarget, 2)
+  const multiBeforeMove = await preservedTaskFields('qa-span-same')
+  const multiMoveGesture = await runIn(
+    mainWindow,
+    `window.__daylineQa.dragTaskDate(
+      'qa-span-same',
+      ${JSON.stringify(multiOriginalStart)},
+      ${JSON.stringify(multiMoveTarget)},
+      'qa-span-cross',
+    )`,
+  )
+  assert.ok(multiMoveGesture, 'Multi-day task must support dropping on an occupied calendar bar')
+  assert.deepEqual(multiMoveGesture.types, ['application/x-dayline-task-date'])
+  assert.equal(multiMoveGesture.targetTaskId, 'qa-span-cross')
+  await waitForRenderer(
+    mainWindow,
+    `(() => {
+      const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.tasks?.find((candidate) => candidate.id === 'qa-span-same')
+      return task?.startDate === ${JSON.stringify(multiMoveTarget)}
+        && task?.dueDate === ${JSON.stringify(multiMoveEnd)}
+        && Boolean(document.querySelector(
+          '[data-qa="calendar-task-segment"][data-task-id="qa-span-same"][data-task-start="${multiMoveTarget}"][data-task-end="${multiMoveEnd}"]',
+        ))
+        && !document.querySelector('[data-qa="task-modal"]')
+    })()`,
+    'multi-day task date move over occupied bar',
+  )
+  assert.deepEqual(
+    await preservedTaskFields('qa-span-same'),
+    multiBeforeMove,
+    'A multi-day date move must preserve duration-independent data and its calendar order',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-task-segment"][data-task-id="qa-span-same"]')
+      ?.dataset.taskStart === ${JSON.stringify(multiMoveTarget)}`,
+    'multi-day occupied-bar move persistence',
+  )
+  assert.ok(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.dragTaskDate(
+        'qa-span-same',
+        ${JSON.stringify(multiMoveTarget)},
+        ${JSON.stringify(multiOriginalStart)},
+      )`,
+    ),
+  )
+  await waitForRenderer(
+    mainWindow,
+    `(() => {
+      const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.tasks?.find((candidate) => candidate.id === 'qa-span-same')
+      return task?.startDate === ${JSON.stringify(multiOriginalStart)}
+        && task?.dueDate === ${JSON.stringify(multiOriginalEnd)}
+    })()`,
+    'multi-day task restored without changing duration',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-task-segment"][data-task-id="qa-span-same"]')
+      ?.dataset.taskStart === ${JSON.stringify(multiOriginalStart)}`,
+    'restored multi-day date persists',
+  )
+  assert.deepEqual(await preservedTaskFields('qa-span-same'), multiBeforeMove)
 
   await runIn(
     mainWindow,
@@ -1736,6 +2733,8 @@ app.whenReady().then(async () => {
     schedule: document.querySelectorAll(
       '[data-qa="schedule-section"] .day-task-list > .task-row[data-task-id]',
     ).length,
+    quickNoteBadge: Number(document.querySelector('[data-qa="quick-note-count"]')?.textContent ?? -1),
+    scheduleBadge: Number(document.querySelector('[data-qa="schedule-count"]')?.textContent ?? -1),
   })`)
 
   // The sidebar + adds a multiline daily note, never a calendar task.
@@ -1769,8 +2768,55 @@ app.whenReady().then(async () => {
     schedule: document.querySelectorAll(
       '[data-qa="schedule-section"] .day-task-list > .task-row[data-task-id]',
     ).length,
+    quickNoteBadge: Number(document.querySelector('[data-qa="quick-note-count"]')?.textContent ?? -1),
+    scheduleBadge: Number(document.querySelector('[data-qa="schedule-count"]')?.textContent ?? -1),
   })`)
-  assert.deepEqual(countsAfterQuickNote, initialCounts, 'A daily note must not enter either calendar task count')
+  assert.deepEqual(
+    countsAfterQuickNote,
+    { ...initialCounts, quickNoteBadge: initialCounts.quickNoteBadge + 1 },
+    'A quick note increments only its own section count, never a calendar or schedule count',
+  )
+
+  qaStage = 'sidebar-schedule-add'
+  const scheduleCountBeforeAdd = countsAfterQuickNote.scheduleBadge
+  const storeBeforeSidebarScheduleAdd = await runIn(
+    mainWindow,
+    `localStorage.getItem('dayline-browser-store-v1')`,
+  )
+  assert.ok(storeBeforeSidebarScheduleAdd, 'Schedule-add QA requires a restorable browser store snapshot')
+  await runIn(mainWindow, `document.querySelector('[data-qa="schedule-add"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="task-modal"]')?.dataset.mode === 'create'
+      && document.activeElement === document.querySelector('[data-qa="task-modal"] .title-input')`,
+    'schedule section add opens focused task form',
+  )
+  await runIn(
+    mainWindow,
+    `window.__daylineQa.setValue('[data-qa="task-modal"] .title-input', 'QA 사이드바 일정 추가')`,
+  )
+  await runIn(mainWindow, `window.__daylineQa.clickButtonText('[data-qa="task-modal"] .modal-footer', '일정 추가')`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && Number(document.querySelector('[data-qa="schedule-count"]')?.textContent) === ${scheduleCountBeforeAdd + 1}
+      && [...document.querySelectorAll('[data-qa="schedule-section"] .task-title')]
+        .some((title) => title.textContent === 'QA 사이드바 일정 추가')`,
+    'schedule section add increments its count and renders the task',
+  )
+  await runIn(
+    mainWindow,
+    `localStorage.setItem('dayline-browser-store-v1', ${JSON.stringify(storeBeforeSidebarScheduleAdd)})`,
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
+      && Number(document.querySelector('[data-qa="schedule-count"]')?.textContent) === ${scheduleCountBeforeAdd}
+      && ![...document.querySelectorAll('[data-qa="schedule-section"] .task-title')]
+        .some((title) => title.textContent === 'QA 사이드바 일정 추가')`,
+    'restored schedule state after isolated sidebar add QA',
+  )
   await runIn(
     mainWindow,
     `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-check')?.click()`,
@@ -2521,24 +3567,16 @@ app.whenReady().then(async () => {
       && document.querySelector('[data-rail-action="templates"]')?.getAttribute('aria-expanded') === 'true'
       && document.querySelector('[data-qa="template-panel"]')?.getAttribute('aria-labelledby')
         === 'rail-action-templates'
+      && document.querySelector('[data-qa="template-form-toggle"]')?.getAttribute('aria-haspopup') === 'dialog'
+      && !document.querySelector('[data-qa="template-modal"]')
       && document.activeElement === document.querySelector('[aria-label="반복 일정 닫기"]')`,
-    'template panel and seeded card',
-  )
-  const templateTextareaOrder = await runIn(
-    mainWindow,
-    `[...document.querySelectorAll('[data-qa="template-form"] textarea')]
-      .map((textarea) => textarea.getAttribute('aria-label'))`,
-  )
-  assert.deepEqual(
-    templateTextareaOrder,
-    ['템플릿 세부 할 일', '템플릿 메모'],
-    'Template form textarea DOM order must place subtasks before memo',
+    'template panel, seeded card, and hidden create form',
   )
   assert.equal(
     await runIn(
       mainWindow,
       `window.__daylineQa.dragAndDrop(
-        '[data-template-id="qa-template-seed"]',
+        '[data-template-id="qa-template-seed"] [data-qa="template-calendar-drag-source"]',
         '[data-date="${templateDropDate}"][data-template-drop-target]',
       )`,
     ),
@@ -2577,7 +3615,7 @@ app.whenReady().then(async () => {
     await runIn(
       mainWindow,
       `window.__daylineQa.dragAndDrop(
-        '[data-template-id="qa-template-seed"]',
+        '[data-template-id="qa-template-seed"] [data-qa="template-calendar-drag-source"]',
         '.calendar-task-segment[data-task-id="${droppedTemplateTaskId}"]',
       )`,
     ),
@@ -2612,6 +3650,83 @@ app.whenReady().then(async () => {
 
   const templateChildLines = ['템플릿 검증 A', '템플릿 검증 B']
   const templateChildren = templateChildLines.join('\n')
+  await runIn(mainWindow, `(() => {
+    const trigger = document.querySelector('[data-qa="template-form-toggle"]')
+    trigger?.focus()
+    trigger?.click()
+  })()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'
+      && document.activeElement === document.querySelector(
+        '[data-qa="template-form"] [aria-label="템플릿 제목"]',
+      )
+      && document.querySelector('[data-qa="template-panel"]')?.inert === true`,
+    'opened focused template create modal',
+  )
+  const templateTextareaOrder = await runIn(
+    mainWindow,
+    `[...document.querySelectorAll('[data-qa="template-form"] textarea')]
+      .map((textarea) => textarea.getAttribute('aria-label'))`,
+  )
+  assert.deepEqual(
+    templateTextareaOrder,
+    ['템플릿 세부 할 일', '템플릿 메모'],
+    'Template form textarea DOM order must place subtasks before memo',
+  )
+  assert.deepEqual(
+    await runIn(mainWindow, `(() => {
+      const form = document.querySelector('[data-qa="template-form"]')
+      return {
+        dateInputs: form?.querySelectorAll('input[type="date"]').length ?? -1,
+        hasStartDate: Boolean(form?.querySelector('[aria-label*="시작 날짜"]')),
+        hasDueDate: Boolean(form?.querySelector('[aria-label*="마감 날짜"]')),
+        hasDuration: Boolean(form?.querySelector('[aria-label="템플릿 기간 일수"]')),
+      }
+    })()`),
+    { dateInputs: 0, hasStartDate: false, hasDueDate: false, hasDuration: true },
+    'A reusable template controls duration, not concrete calendar dates',
+  )
+  await runIn(
+    mainWindow,
+    `window.__daylineQa.setValue('[data-qa="template-form"] [aria-label="템플릿 제목"]', '저장하면 안 되는 템플릿')`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-modal"]')
+      && document.activeElement === document.querySelector('[data-qa="template-form-toggle"]')
+      && ![...document.querySelectorAll('[data-template-id] strong')]
+        .some((title) => title.textContent === '저장하면 안 되는 템플릿')`,
+    'cancelled template create modal without mutation',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'`,
+    'template modal before Escape isolation',
+  )
+  await runIn(
+    mainWindow,
+    `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-modal"]')
+      && Boolean(document.querySelector('[data-qa="template-panel"]'))
+      && document.querySelector('[data-rail-action="templates"]')?.getAttribute('aria-expanded') === 'true'
+      && document.activeElement === document.querySelector('[data-qa="template-form-toggle"]')`,
+    'template Escape closes only the modal and preserves its flyout context',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'
+      && document.activeElement === document.querySelector(
+        '[data-qa="template-form"] [aria-label="템플릿 제목"]',
+      )`,
+    'reopened template create modal',
+  )
   await runIn(
     mainWindow,
     `window.__daylineQa.setValue('[data-qa="template-form"] [aria-label="템플릿 제목"]', 'QA UI 템플릿')`,
@@ -2642,27 +3757,56 @@ app.whenReady().then(async () => {
   )
   await runIn(
     mainWindow,
-    `window.__daylineQa.clickButtonText('[data-qa="template-form"]', '템플릿 추가')`,
+    `window.__daylineQa.clickButtonText('[data-qa="template-form"]', '반복 일정 추가')`,
   )
   const uiTemplateId = await waitForRenderer(
     mainWindow,
     `(() => {
       const card = [...document.querySelectorAll('[data-qa="template-panel"] [data-template-id]')]
         .find((item) => item.querySelector('strong')?.textContent === 'QA UI 템플릿')
-      return card?.dataset.templateId || ''
+      return card && !document.querySelector('[data-qa="template-modal"]')
+        ? card.dataset.templateId
+        : ''
     })()`,
-    'template UI create',
+    'template UI create and automatic modal close',
   )
   await runIn(
     mainWindow,
-    `document.querySelector('[aria-label="QA UI 템플릿 수정"]')?.click()`,
+    `(() => {
+      const trigger = document.querySelector('[aria-label="QA UI 템플릿 수정"]')
+      trigger?.focus()
+      trigger?.click()
+    })()`,
   )
   await waitForRenderer(
     mainWindow,
-    `document.querySelector(
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'edit'
+      && document.querySelector(
       '[data-qa="template-form"] [aria-label="템플릿 세부 할 일"]',
     )?.value === ${JSON.stringify(templateChildren)}`,
     'template multiline child text persistence',
+  )
+  await runIn(
+    mainWindow,
+    `window.__daylineQa.setValue(
+      '[data-qa="template-form"] [aria-label="템플릿 제목"]',
+      '저장하면 안 되는 수정',
+    )`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-modal"]')
+      && document.querySelector('[data-template-id="${uiTemplateId}"] strong')?.textContent === 'QA UI 템플릿'
+      && document.activeElement === document.querySelector('[aria-label="QA UI 템플릿 수정"]')`,
+    'cancelled template edit and focus restoration',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="QA UI 템플릿 수정"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'edit'
+      && document.querySelector('[data-qa="template-form"] [aria-label="템플릿 제목"]')?.value === 'QA UI 템플릿'`,
+    'reopened clean template edit form',
   )
   await runIn(
     mainWindow,
@@ -2678,8 +3822,142 @@ app.whenReady().then(async () => {
   await waitForRenderer(
     mainWindow,
     `document.querySelector('[data-template-id="${uiTemplateId}"] strong')?.textContent
-      === 'QA 수정 템플릿'`,
-    'template UI update',
+      === 'QA 수정 템플릿'
+      && !document.querySelector('[data-qa="template-modal"]')`,
+    'template UI update and modal close',
+  )
+
+  qaStage = 'template-reorder-and-gesture-separation'
+  await runIn(
+    mainWindow,
+    `window.__daylineQa.key(
+      '[data-calendar-drop-target][data-date="${today}"]',
+      'Enter',
+    )`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="template-panel"]'))
+      && Boolean(document.querySelector('[data-reorder-kind="task"]'))
+      && Boolean(document.querySelector('[data-reorder-kind="daily-note"]'))`,
+    'today sidebar reorder handles while template panel remains open',
+  )
+  const templateTaskCountBeforeReorder = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length ?? -1`,
+  )
+  const reorderHandleGeometry = await runIn(mainWindow, `(() => {
+    const describe = (handle, container) => {
+      const handleBounds = handle.getBoundingClientRect()
+      const containerBounds = container.getBoundingClientRect()
+      return {
+        kind: handle.dataset.reorderKind,
+        id: handle.dataset.reorderId,
+        handle: { left: handleBounds.left, right: handleBounds.right },
+        container: { left: containerBounds.left, right: containerBounds.right },
+        inRightHalf: (handleBounds.left + handleBounds.right) / 2
+          >= (containerBounds.left + containerBounds.right) / 2,
+        rightAligned: Math.abs(containerBounds.right - handleBounds.right) <= 22,
+        contained: handleBounds.left >= containerBounds.left - 1
+          && handleBounds.right <= containerBounds.right + 1,
+      }
+    }
+    return [...document.querySelectorAll('[data-reorder-kind]')].map((handle) => {
+      const kind = handle.dataset.reorderKind
+      const container = kind === 'template-order'
+        ? handle.closest('[data-qa="template-reorder-target"]')
+        : kind === 'calendar-task'
+          ? handle.closest('[data-qa="calendar-task-segment"]')
+          : kind === 'daily-note'
+            ? handle.closest('[data-daily-note-id]')
+            : handle.closest('[data-task-id]')
+      return container ? describe(handle, container) : { kind, missingContainer: true }
+    })
+  })()`)
+  assert.ok(
+    reorderHandleGeometry.some((item) => item.kind === 'template-order')
+      && reorderHandleGeometry.some((item) => item.kind === 'calendar-task')
+      && reorderHandleGeometry.some((item) => item.kind === 'daily-note')
+      && reorderHandleGeometry.some((item) => item.kind === 'task'),
+    `Every reorder surface must participate in handle geometry QA: ${JSON.stringify(reorderHandleGeometry)}`,
+  )
+  assert.equal(
+    reorderHandleGeometry.every((item) => item.inRightHalf && item.rightAligned && item.contained),
+    true,
+    `Every mouse reorder handle must be aligned on the item's right: ${JSON.stringify(reorderHandleGeometry)}`,
+  )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.dragAndDrop(
+        '[data-reorder-kind="template-order"][data-reorder-id="${uiTemplateId}"]',
+        '[data-qa="template-reorder-target"][data-template-id="qa-template-seed"]',
+      )`,
+    ),
+    true,
+  )
+  const templatePointerOrder = [uiTemplateId, 'qa-template-seed', 'qa-template-secondary']
+  await waitForRenderer(
+    mainWindow,
+    `JSON.stringify([...document.querySelectorAll(
+      '[data-qa="template-list"] > [data-qa="template-reorder-target"]',
+    )].map((card) => card.dataset.templateId)) === ${JSON.stringify(JSON.stringify(templatePointerOrder))}`,
+    'template pointer reorder',
+  )
+  assert.deepEqual(
+    await runIn(mainWindow, `({
+      taskCount: JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length,
+      calendarDragging: document.querySelector('[data-qa="template-panel"]')
+        ?.hasAttribute('data-calendar-dragging'),
+      modalOpen: Boolean(document.querySelector('[data-qa="task-modal"]')),
+    })`),
+    { taskCount: templateTaskCountBeforeReorder, calendarDragging: false, modalOpen: false },
+    'Template order drag must not become a calendar-copy gesture or instantiate a task',
+  )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.key(
+        '[data-reorder-kind="template-order"][data-reorder-id="${uiTemplateId}"]',
+        'ArrowDown',
+        { altKey: true },
+      )`,
+    ),
+    true,
+  )
+  const templateKeyboardOrder = ['qa-template-seed', uiTemplateId, 'qa-template-secondary']
+  await waitForRenderer(
+    mainWindow,
+    `JSON.stringify([...document.querySelectorAll(
+      '[data-qa="template-list"] > [data-qa="template-reorder-target"]',
+    )].map((card) => card.dataset.templateId)) === ${JSON.stringify(JSON.stringify(templateKeyboardOrder))}`,
+    'template keyboard reorder',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="quick-note-section"]'))
+      && !document.querySelector('[data-qa="template-panel"]')`,
+    'main renderer after template reorder',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="templates"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `JSON.stringify([...document.querySelectorAll(
+      '[data-qa="template-list"] > [data-qa="template-reorder-target"]',
+    )].map((card) => card.dataset.templateId)) === ${JSON.stringify(JSON.stringify(templateKeyboardOrder))}
+      && !document.querySelector('[data-qa="template-modal"]')`,
+    'template order persistence and hidden form after renderer restart',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector('[data-calendar-drop-target][data-date="${oneDayTarget}"]')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.rangeStart === ${JSON.stringify(oneDayTarget)}
+      && document.querySelector('.calendar-grid')?.dataset.rangeEnd === ${JSON.stringify(oneDayTarget)}`,
+    'restore selected date after template reorder reload',
   )
   await runIn(
     mainWindow,
@@ -3066,6 +4344,18 @@ app.whenReady().then(async () => {
   )
 
   qaStage = 'recovery-bottom-dialog'
+  assert.deepEqual(
+    await runIn(mainWindow, `(() => {
+      const action = document.querySelector('[data-rail-action="recovery"]')
+      return {
+        label: action?.getAttribute('aria-label'),
+        text: action?.textContent?.trim() ?? null,
+        badge: Boolean(action?.querySelector('.nav-badge')),
+      }
+    })()`),
+    { label: '최근 삭제', text: '', badge: false },
+    'Empty recent-deletion action must not announce or paint a zero count',
+  )
   await sleep(780)
   await runIn(
     mainWindow,
@@ -3076,8 +4366,9 @@ app.whenReady().then(async () => {
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('.calendar-task-segment[data-task-id="qa-span-cross"]')
-      && document.querySelector('[data-rail-action="recovery"] .nav-badge')?.textContent?.trim() === '1'`,
-    'deleted task count on bottom recovery action',
+      && document.querySelector('[data-rail-action="recovery"]')?.getAttribute('aria-label') === '최근 삭제'
+      && !document.querySelector('[data-rail-action="recovery"] .nav-badge')`,
+    'deleted task remains recoverable without a numeric rail badge',
   )
   mainWindow.show()
   mainWindow.focus()
@@ -3307,6 +4598,9 @@ app.whenReady().then(async () => {
       const recoveryRailAction = document.querySelector(
         '.side-rail > .rail-bottom [data-rail-action="recovery"]',
       )
+      const updateRailAction = document.querySelector(
+        '.side-rail > .rail-bottom [data-rail-action="updates"]',
+      )
       const helpRailAction = document.querySelector(
         '.side-rail > .rail-bottom [data-rail-action="help"]',
       )
@@ -3314,7 +4608,7 @@ app.whenReady().then(async () => {
         !panel || !body || !quick || !schedule || !add || !headerAdd
         || !workspace || !splitter || !root || !shell || !noteList || !taskList
         || !calendarGrid || calendarCells.length !== 42 || !rail
-        || primaryRailActions.length !== 4 || !recoveryRailAction || !helpRailAction
+        || primaryRailActions.length !== 4 || !updateRailAction || !recoveryRailAction || !helpRailAction
       ) return null
       const rect = (element) => {
         const bounds = element.getBoundingClientRect()
@@ -3424,7 +4718,7 @@ app.whenReady().then(async () => {
         },
         railGeometry: (() => {
           const railBounds = rect(rail)
-          const actions = [...primaryRailActions, recoveryRailAction, helpRailAction].map((button) => ({
+          const actions = [...primaryRailActions, updateRailAction, recoveryRailAction, helpRailAction].map((button) => ({
             action: button.dataset.railAction,
             bounds: rect(button),
           }))
@@ -3445,6 +4739,10 @@ app.whenReady().then(async () => {
               || orderedByTop[index - 1].bounds.bottom <= action.bounds.top + 1),
             recoveryBelowPrimary: recoveryRailAction.getBoundingClientRect().top
               >= primaryRailActions.at(-1).getBoundingClientRect().bottom,
+            updateBelowPrimary: updateRailAction.getBoundingClientRect().top
+              >= primaryRailActions.at(-1).getBoundingClientRect().bottom,
+            recoveryBelowUpdate: recoveryRailAction.getBoundingClientRect().top
+              >= updateRailAction.getBoundingClientRect().bottom,
             helpBelowRecovery: helpRailAction.getBoundingClientRect().top
               >= recoveryRailAction.getBoundingClientRect().bottom,
             helpNearBottom: railBounds.bottom
@@ -3495,7 +4793,7 @@ app.whenReady().then(async () => {
   )
   assert.deepEqual(
     minimumLayout.railGeometry.actions.map((item) => item.action),
-    ['templates', 'filters', 'tags', 'appearance', 'recovery', 'help'],
+    ['templates', 'filters', 'tags', 'appearance', 'updates', 'recovery', 'help'],
     'Minimum-size rail must preserve its semantic action order',
   )
   assert.equal(
@@ -3504,13 +4802,250 @@ app.whenReady().then(async () => {
     `Every rail action must remain in the 1050x680 viewport: ${JSON.stringify(minimumLayout.railGeometry)}`,
   )
   assert.equal(minimumLayout.railGeometry.noOverlap, true, 'Minimum-size rail actions must not overlap')
+  assert.equal(minimumLayout.railGeometry.updateBelowPrimary, true)
   assert.equal(minimumLayout.railGeometry.recoveryBelowPrimary, true)
+  assert.equal(minimumLayout.railGeometry.recoveryBelowUpdate, true)
   assert.equal(minimumLayout.railGeometry.helpBelowRecovery, true, 'Help must remain below recovery')
   assert.equal(minimumLayout.railGeometry.helpNearBottom, true, 'Help must remain anchored at rail bottom')
   console.log(
     `Minimum calendar overlay: lanes=${minimumLayout.calendarGeometry.maxLanes}, `
       + `segments=${minimumLayout.calendarGeometry.segmentCount}, `
       + `overflows=${minimumLayout.calendarGeometry.overflowCount}`,
+  )
+
+  qaStage = 'minimum-rail-collapse-and-template-hit-test'
+  await runIn(mainWindow, `document.querySelector('[data-qa="rail-brand-toggle"]')?.click()`)
+  await sleep(240)
+  const minimumCollapsedRail = await waitForRenderer(mainWindow, `(() => {
+    const shell = document.querySelector('.main-shell')
+    const rail = document.querySelector('[data-qa="side-rail"]')
+    const toggle = document.querySelector('[data-qa="rail-open-button"]')
+    const workspace = document.querySelector('.calendar-workspace')
+    const panel = document.querySelector('.day-panel')
+    const headerAdd = document.querySelector('.header-add')
+    const quickAdd = document.querySelector('[data-qa="quick-note-section"] [data-qa="quick-note-add"]')
+    if (!shell || !rail || !toggle || !workspace || !panel || !headerAdd || !quickAdd) return null
+    const rect = (element) => {
+      const bounds = element.getBoundingClientRect()
+      return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }
+    }
+    const railRect = rect(rail)
+    const toggleRect = rect(toggle)
+    const workspaceRect = rect(workspace)
+    const panelRect = rect(panel)
+    const headerAddRect = rect(headerAdd)
+    const quickAddRect = rect(quickAdd)
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      scaleToken: getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim(),
+      state: rail.dataset.state,
+      collapsed: shell.dataset.railCollapsed,
+      expanded: toggle.getAttribute('aria-expanded'),
+      railHidden: rail.hidden,
+      rail: railRect,
+      toggle: toggleRect,
+      workspace: workspaceRect,
+      panel: panelRect,
+      toggleContained: toggleRect.left >= workspaceRect.left - 1
+        && toggleRect.right <= workspaceRect.right + 1
+        && toggleRect.top >= -1
+        && toggleRect.bottom <= innerHeight + 1,
+      columnsSeparated: workspaceRect.left >= railRect.right - 1
+        && workspaceRect.right <= panelRect.left + 1,
+      coreControlsVisible: [headerAddRect, quickAddRect].every((bounds) =>
+        bounds.left >= -1 && bounds.right <= innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= innerHeight + 1),
+      noFlyout: !document.querySelector('.rail-flyout'),
+      noPageOverflow: document.documentElement.scrollWidth <= innerWidth + 1
+        && document.documentElement.scrollHeight <= innerHeight + 1,
+    }
+  })()`, 'minimum collapsed rail geometry')
+  assert.deepEqual(
+    {
+      scaleToken: minimumCollapsedRail.scaleToken,
+      state: minimumCollapsedRail.state,
+      collapsed: minimumCollapsedRail.collapsed,
+      expanded: minimumCollapsedRail.expanded,
+      railHidden: minimumCollapsedRail.railHidden,
+      toggleContained: minimumCollapsedRail.toggleContained,
+      columnsSeparated: minimumCollapsedRail.columnsSeparated,
+      coreControlsVisible: minimumCollapsedRail.coreControlsVisible,
+      noFlyout: minimumCollapsedRail.noFlyout,
+      noPageOverflow: minimumCollapsedRail.noPageOverflow,
+    },
+    {
+      scaleToken: '15px',
+      state: 'closed',
+      collapsed: 'true',
+      expanded: 'false',
+      railHidden: true,
+      toggleContained: true,
+      columnsSeparated: true,
+      coreControlsVisible: true,
+      noFlyout: true,
+      noPageOverflow: true,
+    },
+    `1050x680 @150% rail collapse must stay contained: ${JSON.stringify(minimumCollapsedRail)}`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="rail-open-button"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="side-rail"]')?.dataset.state === 'open'
+      && !document.querySelector('[data-qa="side-rail"]')?.hidden
+      && document.activeElement === document.querySelector('[data-qa="rail-brand-toggle"]')`,
+    'minimum rail reopened',
+  )
+
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="templates"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="template-panel"] [data-template-id="qa-template-seed"]'))
+      && !document.querySelector('[data-qa="template-modal"]')`,
+    'minimum template flyout with hidden create form',
+  )
+  const minimumTemplatePanel = await runIn(mainWindow, `(() => {
+    const panel = document.querySelector('[data-qa="template-panel"]')
+    const close = panel?.querySelector('[aria-label="반복 일정 닫기"]')
+    const toggle = panel?.querySelector('[data-qa="template-form-toggle"]')
+    const list = panel?.querySelector('[data-qa="template-list"]')
+    if (!panel || !close || !toggle || !list) return null
+    const rect = (element) => {
+      const bounds = element.getBoundingClientRect()
+      return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }
+    }
+    const panelRect = rect(panel)
+    return {
+      panel: panelRect,
+      close: rect(close),
+      toggle: rect(toggle),
+      contained: panelRect.left >= -1 && panelRect.right <= innerWidth + 1
+        && panelRect.top >= -1 && panelRect.bottom <= innerHeight + 1,
+      controlsContained: [close, toggle].every((element) => {
+        const bounds = element.getBoundingClientRect()
+        return bounds.left >= panelRect.left - 1 && bounds.right <= panelRect.right + 1
+          && bounds.top >= panelRect.top - 1 && bounds.bottom <= panelRect.bottom + 1
+      }),
+      scrollable: ['auto', 'scroll'].includes(getComputedStyle(list.parentElement).overflowY),
+      noPageOverflow: document.documentElement.scrollWidth <= innerWidth + 1
+        && document.documentElement.scrollHeight <= innerHeight + 1,
+    }
+  })()`)
+  assert.ok(minimumTemplatePanel, 'Minimum template flyout geometry must be measurable')
+  assert.deepEqual(
+    {
+      contained: minimumTemplatePanel.contained,
+      controlsContained: minimumTemplatePanel.controlsContained,
+      scrollable: minimumTemplatePanel.scrollable,
+      noPageOverflow: minimumTemplatePanel.noPageOverflow,
+    },
+    { contained: true, controlsContained: true, scrollable: true, noPageOverflow: true },
+    `Template flyout must stay usable at 1050x680 @150%: ${JSON.stringify(minimumTemplatePanel)}`,
+  )
+  const minimumTaskCountBeforeFlyoutDrops = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length ?? -1`,
+  )
+  const sundayTemplateDrop = await dragTemplateToCalendarNative(
+    mainWindow,
+    'qa-template-seed',
+    '2026-08-02',
+  )
+  assert.ok(sundayTemplateDrop, 'Template copy must reach the Sunday calendar cell')
+  assert.equal(sundayTemplateDrop.inputPath, 'Input.dispatchMouseEvent')
+  const sundayDragState = sundayTemplateDrop.during
+  assert.equal(sundayDragState.connected, true)
+  assert.equal(sundayDragState.dragging, 'true')
+  assert.equal(sundayDragState.pointerEvents, 'none')
+  assert.equal(sundayDragState.opacity, '0')
+  assert.equal(sundayDragState.inert, false)
+  assert.equal(sundayDragState.ariaHidden, 'true')
+  assert.equal(sundayTemplateDrop.during.hitDate, '2026-08-02')
+  assert.equal(sundayTemplateDrop.during.hitInsidePanel, false)
+  assert.equal(sundayTemplateDrop.during.trace.dragstart.templateId, 'qa-template-seed')
+  assert.deepEqual({
+    connected: sundayTemplateDrop.after.connected,
+    dragging: sundayTemplateDrop.after.dragging,
+    pointerEvents: sundayTemplateDrop.after.pointerEvents,
+    expanded: sundayTemplateDrop.after.expanded,
+  }, {
+    connected: true,
+    dragging: null,
+    pointerEvents: 'auto',
+    expanded: 'true',
+  }, 'Template flyout must visibly reopen after the native Sunday drop')
+  assert.equal(sundayTemplateDrop.after.trace.dragover?.date, '2026-08-02')
+  assert.equal(sundayTemplateDrop.after.trace.drop?.date, '2026-08-02')
+  assert.ok(sundayTemplateDrop.after.trace.drop?.types.includes('application/x-dayline-template'))
+  assert.ok(
+    sundayTemplateDrop.after.trace.dragend?.at >= sundayTemplateDrop.after.trace.drop?.at,
+    `Native Sunday drop must precede dragend: ${JSON.stringify(sundayTemplateDrop.after.trace)}`,
+  )
+  const mondayTemplateDrop = await dragTemplateToCalendarNative(
+    mainWindow,
+    'qa-template-secondary',
+    '2026-08-03',
+  )
+  assert.ok(mondayTemplateDrop, 'Template copy must reach the Monday calendar cell')
+  assert.equal(mondayTemplateDrop.inputPath, 'Input.dispatchMouseEvent')
+  const mondayDragState = mondayTemplateDrop.during
+  assert.equal(mondayDragState.connected, true)
+  assert.equal(mondayDragState.dragging, 'true')
+  assert.equal(mondayDragState.pointerEvents, 'none')
+  assert.equal(mondayDragState.opacity, '0')
+  assert.equal(mondayDragState.inert, false)
+  assert.equal(mondayDragState.ariaHidden, 'true')
+  assert.ok(
+    mondayTemplateDrop.during.hitDate === '2026-08-03' || mondayTemplateDrop.during.hitTaskId,
+    `Monday target must hit either its cell or an existing connected task bar: ${JSON.stringify(mondayTemplateDrop.during)}`,
+  )
+  assert.equal(mondayTemplateDrop.during.hitInsidePanel, false)
+  assert.deepEqual({
+    connected: mondayTemplateDrop.after.connected,
+    dragging: mondayTemplateDrop.after.dragging,
+    pointerEvents: mondayTemplateDrop.after.pointerEvents,
+    expanded: mondayTemplateDrop.after.expanded,
+  }, {
+    connected: true,
+    dragging: null,
+    pointerEvents: 'auto',
+    expanded: 'true',
+  }, 'Template flyout must visibly reopen after the native Monday drop')
+  assert.ok(
+    mondayTemplateDrop.after.trace.dragover?.date === '2026-08-03'
+      || mondayTemplateDrop.after.trace.dragover?.taskId,
+    'Monday dragover must reach either the date cell or its task-bar overlay',
+  )
+  assert.ok(
+    mondayTemplateDrop.after.trace.drop?.date === '2026-08-03'
+      || mondayTemplateDrop.after.trace.drop?.taskId,
+    'Monday drop must reach either the date cell or its task-bar overlay',
+  )
+  assert.ok(mondayTemplateDrop.after.trace.drop?.types.includes('application/x-dayline-template'))
+  assert.ok(
+    mondayTemplateDrop.after.trace.dragend?.at >= mondayTemplateDrop.after.trace.drop?.at,
+    `Native Monday drop must precede dragend: ${JSON.stringify(mondayTemplateDrop.after.trace)}`,
+  )
+  console.log('Native template DnD: Sunday cell and Monday task-bar overlay passed')
+  await waitForRenderer(
+    mainWindow,
+    `(() => {
+      const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      const active = (store?.tasks ?? []).filter((task) => !task.deletedAt)
+      return (store?.tasks?.length ?? -1) === ${minimumTaskCountBeforeFlyoutDrops + 2}
+        && active.some((task) => task.title === 'QA 3일 템플릿'
+          && task.startDate === '2026-08-02' && task.dueDate === '2026-08-04')
+        && active.some((task) => task.title === 'QA 보조 템플릿'
+          && task.startDate === '2026-08-03' && task.dueDate === '2026-08-03')
+        && !document.querySelector('[data-qa="task-modal"]')
+    })()`,
+    'Sunday and Monday flyout-retracted template drops',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="반복 일정 닫기"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-panel"]')
+      && document.activeElement === document.querySelector('[data-rail-action="templates"]')`,
+    'minimum template panel close after hit-tested drops',
   )
 
   const inspectMinimumRailPanel = async (action, qa, closeLabel) => {

@@ -2,13 +2,21 @@ const { app, BrowserWindow, ipcMain, screen } = require('electron')
 const fs = require('node:fs')
 const path = require('node:path')
 const { fileURLToPath } = require('node:url')
+const { autoUpdater } = require('electron-updater')
 const { createDaylineDatabase } = require('./database.cjs')
+const {
+  configureAutoUpdater,
+  createUpdaterController,
+  getUpdateSupport,
+} = require('./updater.cjs')
 
 let mainWindow = null
 let widgetWindow = null
 let taskDatabase = null
 let windowStatePath = ''
 let persistBoundsTimer = null
+let updaterController = null
+let databaseWritesBlocked = false
 
 const isDev = !app.isPackaged
 const isDatabaseQa = process.env.DAYLINE_DATABASE_QA === '1'
@@ -153,6 +161,7 @@ function createMainWindow() {
   loadRenderer(mainWindow, 'main')
   mainWindow.once('ready-to-show', () => {
     if (!isDatabaseQa) mainWindow?.show()
+    void updaterController?.startupCheck()
   })
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -160,16 +169,20 @@ function createMainWindow() {
   return mainWindow
 }
 
+function persistWidgetBoundsNow() {
+  clearTimeout(persistBoundsTimer)
+  persistBoundsTimer = null
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
+  const state = readWindowState()
+  state.widget.bounds = widgetWindow.getBounds()
+  state.widget.pinned = widgetWindow.isAlwaysOnTop()
+  state.widget.locked = !widgetWindow.isResizable()
+  writeWindowState(state)
+}
+
 function persistWidgetBoundsSoon() {
   clearTimeout(persistBoundsTimer)
-  persistBoundsTimer = setTimeout(() => {
-    if (!widgetWindow || widgetWindow.isDestroyed()) return
-    const state = readWindowState()
-    state.widget.bounds = widgetWindow.getBounds()
-    state.widget.pinned = widgetWindow.isAlwaysOnTop()
-    state.widget.locked = !widgetWindow.isResizable()
-    writeWindowState(state)
-  }, 180)
+  persistBoundsTimer = setTimeout(persistWidgetBoundsNow, 180)
 }
 
 function createWidgetWindow() {
@@ -232,6 +245,59 @@ function broadcastData(store, senderId) {
   }
 }
 
+function broadcastUpdateState(state) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.webContents.send('dayline:update-state', state)
+  } catch {
+    // The main window can be destroyed between the guard and delivery.
+  }
+}
+
+function closeTaskDatabase() {
+  const database = taskDatabase
+  taskDatabase = null
+  database?.close()
+}
+
+function openTaskDatabase() {
+  if (taskDatabase) return
+  const userDataPath = app.getPath('userData')
+  taskDatabase = createDaylineDatabase({
+    databasePath: path.join(userDataPath, 'dayline.db'),
+    legacyJsonPath: path.join(userDataPath, 'dayline-data.json'),
+  })
+}
+
+function prepareForUpdateInstall() {
+  databaseWritesBlocked = true
+  persistWidgetBoundsNow()
+}
+
+function recoverFromFailedUpdateInstall() {
+  databaseWritesBlocked = false
+}
+
+function createAppUpdater() {
+  const support = getUpdateSupport({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+    portableExecutableFile: process.env.PORTABLE_EXECUTABLE_FILE,
+    portableExecutableDir: process.env.PORTABLE_EXECUTABLE_DIR,
+    isQa: isDatabaseQa,
+    fileExists: fs.existsSync,
+  })
+  return createUpdaterController({
+    adapter: configureAutoUpdater(autoUpdater),
+    currentVersion: app.getVersion(),
+    support,
+    broadcast: broadcastUpdateState,
+    beforeInstall: prepareForUpdateInstall,
+    afterInstallFailure: recoverFromFailedUpdateInstall,
+  })
+}
+
 function registerIpc() {
   const trustedDataWindow = (sender) => {
     const owner = BrowserWindow.fromWebContents(sender)
@@ -239,11 +305,17 @@ function registerIpc() {
   }
   ipcMain.handle('dayline:data-load', (event) => {
     if (!trustedDataWindow(event.sender)) throw new Error('Untrusted Dayline data sender')
+    if (databaseWritesBlocked || !taskDatabase) {
+      throw new Error('Dayline database is unavailable while updating')
+    }
     return taskDatabase.readStore()
   })
   const applyStoreMutations = (event, mutations) => {
     try {
       if (!trustedDataWindow(event.sender)) throw new Error('Untrusted Dayline data sender')
+      if (databaseWritesBlocked || !taskDatabase) {
+        throw new Error('Dayline database writes are blocked while updating')
+      }
       if (!Array.isArray(mutations) || mutations.length > 1000) {
         throw new Error('Invalid Dayline mutation batch')
       }
@@ -302,6 +374,22 @@ function registerIpc() {
     return true
   })
   ipcMain.handle('dayline:widget-state', () => readWindowState().widget)
+
+  const trustedMainWindow = (sender) => {
+    const owner = BrowserWindow.fromWebContents(sender)
+    return owner && owner === mainWindow ? owner : null
+  }
+  const invokeUpdater = (event, action) => {
+    if (!trustedMainWindow(event.sender)) throw new Error('Untrusted Dayline updater sender')
+    return updaterController[action]()
+  }
+  ipcMain.handle('dayline:update-get-state', (event) => {
+    if (!trustedMainWindow(event.sender)) throw new Error('Untrusted Dayline updater sender')
+    return updaterController.getState()
+  })
+  ipcMain.handle('dayline:update-check', (event) => invokeUpdater(event, 'check'))
+  ipcMain.handle('dayline:update-download', (event) => invokeUpdater(event, 'download'))
+  ipcMain.handle('dayline:update-install', (event) => invokeUpdater(event, 'install'))
 }
 
 const singleInstance = app.requestSingleInstanceLock()
@@ -312,11 +400,10 @@ if (!singleInstance) {
   app.whenReady().then(() => {
     const userDataPath = app.getPath('userData')
     fs.mkdirSync(userDataPath, { recursive: true })
-    taskDatabase = createDaylineDatabase({
-      databasePath: path.join(userDataPath, 'dayline.db'),
-      legacyJsonPath: path.join(userDataPath, 'dayline-data.json'),
-    })
+    openTaskDatabase()
+    databaseWritesBlocked = false
     windowStatePath = path.join(userDataPath, 'dayline-window-state.json')
+    updaterController = createAppUpdater()
     registerIpc()
     createMainWindow()
 
@@ -331,6 +418,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  taskDatabase?.close()
-  taskDatabase = null
+  databaseWritesBlocked = true
+  persistWidgetBoundsNow()
+  closeTaskDatabase()
 })
