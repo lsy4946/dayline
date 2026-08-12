@@ -79,26 +79,49 @@ app.whenReady().then(async () => {
       described: Boolean(alert.getAttribute('aria-describedby')),
       outsideInert: [...layer.parentElement.children].filter((child) => child !== layer)
         .some((child) => child.inert),
-      hasNotes: Boolean(document.querySelector('[data-qa="update-release-notes"]')),
+      dialogReleaseNoteCopies: layer.querySelectorAll('[data-qa="update-release-notes"]').length,
     }
   })()`, 'available dialog and focus')
   assert.deepEqual(dialog, {
     role: 'alertdialog', modal: 'true', labelled: true, described: true,
-    outsideInert: true, hasNotes: true,
+    outsideInert: true, dialogReleaseNoteCopies: 1,
   })
+  assert.equal(
+    await runIn(window, `window.dayline.__updateQa.getCalls().install`),
+    0,
+    'Checking and finding an update must not install without explicit consent',
+  )
 
   qaStage = 'release-notes-semantics-and-scroll'
   const releaseNotes = await runIn(window, `(() => {
-    const notes = document.querySelector('[data-qa="update-release-notes"]')
+    const notes = document.querySelector(
+      '[data-qa="update-available-dialog"] [data-qa="update-release-notes"]',
+    )
     if (!notes) return null
     const kinds = [...notes.querySelectorAll('[data-release-note-kind]')]
       .map((node) => ({ kind: node.dataset.releaseNoteKind, tag: node.tagName }))
+    const headings = [...notes.querySelectorAll('h4, h5')].map((heading) => heading.textContent?.trim())
+    const versionGroups = Object.fromEntries(
+      [...notes.querySelectorAll('h4')]
+        .filter((heading) => /^v\\d+\\.\\d+\\.\\d+$/.test(heading.textContent?.trim() ?? ''))
+        .map((heading) => {
+          const items = []
+          let sibling = heading.nextElementSibling
+          while (sibling && !sibling.matches('h4')) {
+            items.push(...[...sibling.querySelectorAll('li')].map((item) => item.textContent?.trim()))
+            sibling = sibling.nextElementSibling
+          }
+          return [heading.textContent.trim(), items]
+        }),
+    )
     const before = notes.scrollTop
     notes.scrollTop = Math.min(64, notes.scrollHeight)
     return {
       role: notes.getAttribute('role'),
       label: notes.getAttribute('aria-label'),
       kinds,
+      headings,
+      versionGroups,
       listItems: [...notes.querySelectorAll('li')].map((item) => item.textContent),
       hasUnsafeOrInteractiveNode: Boolean(notes.querySelector('a, script, style, iframe, object, embed')),
       unsafeGlobal: Boolean(window.__unsafeReleaseNote),
@@ -112,13 +135,37 @@ app.whenReady().then(async () => {
   assert.ok(releaseNotes, 'Structured release notes must render')
   assert.equal(releaseNotes.role, 'region')
   assert.equal(releaseNotes.label, '릴리스 노트 상세')
-  assert.deepEqual(releaseNotes.kinds.slice(0, 5), [
+  assert.deepEqual(releaseNotes.kinds.slice(0, 10), [
     { kind: 'heading', tag: 'H4' },
-    { kind: 'paragraph', tag: 'P' },
+    { kind: 'heading', tag: 'H5' },
+    { kind: 'list', tag: 'UL' },
+    { kind: 'heading', tag: 'H5' },
+    { kind: 'list', tag: 'UL' },
+    { kind: 'heading', tag: 'H4' },
+    { kind: 'heading', tag: 'H5' },
     { kind: 'list', tag: 'UL' },
     { kind: 'heading', tag: 'H5' },
     { kind: 'list', tag: 'OL' },
   ])
+  assert.deepEqual(
+    releaseNotes.headings.slice(0, 6),
+    ['v0.3.1', '반복 일정', '좌측 메뉴', 'v0.3.2', '업데이트', '보안 검증'],
+    'Cumulative release scopes must preserve chronological version order',
+  )
+  assert.deepEqual(releaseNotes.versionGroups, {
+    'v0.3.1': [
+      '반복 일정 템플릿을 캘린더로 드래그할 수 있습니다.',
+      '좌측 메뉴를 완전히 접을 수 있습니다.',
+      '최근 삭제 동작을 다듬었습니다.',
+    ],
+    'v0.3.2': [
+      '누적 변경 사항을 버전별로 표시합니다.',
+      '다운로드한 업데이트를 자동 설치하고 다시 시작합니다.',
+      '릴리스 보기 — https://example.invalid/release는 안전한 텍스트로 표시됩니다.',
+      'HTML은 실행하지 않고 텍스트로 표시합니다.',
+      '링크는 클릭 요소가 아닌 읽을 수 있는 텍스트로 표시합니다.',
+    ],
+  })
   assert.ok(
     releaseNotes.listItems.some((item) => item.includes('릴리스 보기')
       && item.includes('https://example.invalid/release')),
@@ -146,11 +193,24 @@ app.whenReady().then(async () => {
   })()`, 'dialog download progress')
   assert.deepEqual(downloading, { role: 'progressbar', min: '0', max: '100', now: '37', calls: 1 })
 
-  await waitFor(window, `document.querySelector('[data-qa="update-dialog-primary"]')?.textContent.includes('설치')`, 'downloaded install action')
-  qaStage = 'install'
-  await runIn(window, `document.querySelector('[data-qa="update-dialog-primary"]')?.click()`)
-  await waitFor(window, `window.dayline.__updateQa.getCalls().install === 1
-    && document.body.innerText.includes('설치하고')`, 'fake install invocation and installing state')
+  qaStage = 'silent-auto-install'
+  const silentInstall = await waitFor(window, `(() => {
+    const calls = window.dayline.__updateQa.getCalls()
+    const dialog = document.querySelector('[data-qa="update-available-dialog"]')
+    if (calls.install !== 1 || dialog?.dataset.state !== 'installing') return null
+    return {
+      downloadCalls: calls.download,
+      installCalls: calls.install,
+      installArguments: calls.installArguments,
+      hasManualInstallAction: Boolean(document.querySelector('[data-qa="update-dialog-primary"]')),
+      copy: dialog?.innerText,
+    }
+  })()`, 'silent installation immediately after download')
+  assert.equal(silentInstall.downloadCalls, 1)
+  assert.equal(silentInstall.installCalls, 1)
+  assert.deepEqual(silentInstall.installArguments, [true, true])
+  assert.equal(silentInstall.hasManualInstallAction, false)
+  assert.ok(silentInstall.copy.includes('설치하고'))
 
   // A second isolated renderer verifies the explicit "latest" manual result without
   // coupling to the available-version notification flow above.
@@ -191,20 +251,194 @@ app.whenReady().then(async () => {
     query: { mode: 'main', qaDate: '2026-08-12', updateQa: 'available' },
   })
   await startupLoaded
+  assert.equal(await runIn(startupWindow, `window.dayline.__updateQa.getCalls().install`), 0)
   await waitFor(startupWindow, `(() => {
     const layer = document.querySelector('[data-qa="update-available-dialog"]')
     const primary = layer?.querySelector('[data-qa="update-dialog-primary"]')
     const shell = document.querySelector('.main-shell')
     return Boolean(layer && primary && document.activeElement === primary && shell?.inert)
   })()`, 'startup available dialog, focus, and inert background')
+  assert.equal(
+    await runIn(startupWindow, `window.dayline.__updateQa.getCalls().install`),
+    0,
+    'Startup availability must not install before explicit consent',
+  )
   await runIn(startupWindow, `document.querySelector('[data-qa="update-dialog-later"]')?.click()`)
   await waitFor(startupWindow, `!document.querySelector('[data-qa="update-available-dialog"]')
     && !document.querySelector('.main-shell')?.inert`, 'startup dialog later dismissal')
+
+  qaStage = 'deferred-task-update'
+  const taskConflictWindow = new BrowserWindow({
+    width: 1120,
+    height: 700,
+    show: false,
+    webPreferences: {
+      backgroundThrottling: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'qa-updater-preload.cjs'),
+    },
+  })
+  const taskConflictLoaded = waitForLoad(taskConflictWindow)
+  await taskConflictWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    query: { mode: 'main', qaDate: '2026-08-12' },
+  })
+  await taskConflictLoaded
+  await waitFor(taskConflictWindow, `Boolean(document.querySelector('[data-qa="schedule-add"]'))`, 'task update-conflict launcher')
+  await runIn(taskConflictWindow, `document.querySelector('[data-qa="schedule-add"]')?.click()`)
+  await waitFor(taskConflictWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.mode === 'create'`, 'task update-conflict editor')
+  await runIn(taskConflictWindow, `(() => {
+    const input = document.querySelector('[data-qa="task-modal"] .title-input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, 'QA deferred task draft')
+    input?.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await waitFor(taskConflictWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'true'`, 'dirty task before update event')
+  await runIn(taskConflictWindow, `window.dayline.__updateQa.available()`)
+  await new Promise((resolve) => setTimeout(resolve, 140))
+  assert.deepEqual(
+    await runIn(taskConflictWindow, `(() => ({
+      updateState: window.dayline.__updateQa.getState().status,
+      updatePromptOpen: Boolean(document.querySelector('[data-qa="update-available-dialog"]')),
+      modalMode: document.querySelector('[data-qa="task-modal"]')?.dataset.mode,
+      dirty: document.querySelector('[data-qa="task-modal"]')?.dataset.dirty,
+      draft: document.querySelector('[data-qa="task-modal"] .title-input')?.value,
+    }))()`),
+    {
+      updateState: 'available',
+      updatePromptOpen: false,
+      modalMode: 'create',
+      dirty: 'true',
+      draft: 'QA deferred task draft',
+    },
+    'An available update must wait behind a dirty task editor without replacing its draft',
+  )
+  await runIn(taskConflictWindow, `document.querySelector('[data-qa="task-modal"] .modal-footer .secondary-button')?.click()`)
+  await waitFor(taskConflictWindow, `Boolean(document.querySelector('[data-qa="update-available-dialog"]'))
+    && !document.querySelector('[data-qa="task-modal"]')`, 'deferred task update prompt after editor close')
+
+  // Force the otherwise transient overlap to ensure the update dialog owns Escape.
+  // This catches propagation to TaskModal's window-level Escape listener.
+  await runIn(taskConflictWindow, `(() => {
+    document.querySelector('.main-shell').inert = false
+    document.querySelector('[data-qa="schedule-add"]')?.click()
+  })()`)
+  await waitFor(taskConflictWindow, `Boolean(document.querySelector('[data-qa="task-modal"]'))`, 'task modal under update prompt')
+  await runIn(taskConflictWindow, `(() => {
+    const input = document.querySelector('[data-qa="task-modal"] .title-input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, 'QA task Escape sentinel')
+    input?.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await waitFor(taskConflictWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'true'`, 'dirty task Escape sentinel')
+  await runIn(taskConflictWindow, `(() => {
+    const target = document.querySelector('[data-qa="update-dialog-later"]')
+    target?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+    }))
+  })()`)
+  await waitFor(taskConflictWindow, `!document.querySelector('[data-qa="update-available-dialog"]')`, 'task update prompt Escape dismissal')
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(
+    await runIn(taskConflictWindow, `(() => ({
+      modalOpen: Boolean(document.querySelector('[data-qa="task-modal"]')),
+      dirty: document.querySelector('[data-qa="task-modal"]')?.dataset.dirty,
+      draft: document.querySelector('[data-qa="task-modal"] .title-input')?.value,
+    }))()`),
+    { modalOpen: true, dirty: 'true', draft: 'QA task Escape sentinel' },
+    'Escape handled by the update prompt must not also close the underlying task editor',
+  )
+  await runIn(taskConflictWindow, `document.querySelector('[data-qa="task-modal"] .modal-footer .secondary-button')?.click()`)
+  await waitFor(taskConflictWindow, `!document.querySelector('[data-qa="task-modal"]')`, 'task conflict cleanup')
+
+  qaStage = 'deferred-template-update'
+  const templateConflictWindow = new BrowserWindow({
+    width: 1120,
+    height: 700,
+    show: false,
+    webPreferences: {
+      backgroundThrottling: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'qa-updater-preload.cjs'),
+    },
+  })
+  const templateConflictLoaded = waitForLoad(templateConflictWindow)
+  await templateConflictWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    query: { mode: 'main', qaDate: '2026-08-12' },
+  })
+  await templateConflictLoaded
+  await waitFor(templateConflictWindow, `Boolean(document.querySelector('[data-rail-action="templates"]'))`, 'template update-conflict launcher')
+  await runIn(templateConflictWindow, `document.querySelector('[data-rail-action="templates"]')?.click()`)
+  await waitFor(templateConflictWindow, `Boolean(document.querySelector('[data-qa="template-form-toggle"]'))`, 'template create launcher')
+  await runIn(templateConflictWindow, `document.querySelector('[data-qa="template-form-toggle"]')?.click()`)
+  await waitFor(templateConflictWindow, `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'`, 'template update-conflict editor')
+  await runIn(templateConflictWindow, `(() => {
+    const input = document.querySelector('[data-qa="template-modal"] .title-input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, 'QA deferred template draft')
+    input?.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await waitFor(templateConflictWindow, `document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'true'`, 'dirty template before update event')
+  await runIn(templateConflictWindow, `window.dayline.__updateQa.available()`)
+  await new Promise((resolve) => setTimeout(resolve, 140))
+  assert.deepEqual(
+    await runIn(templateConflictWindow, `(() => ({
+      updateState: window.dayline.__updateQa.getState().status,
+      updatePromptOpen: Boolean(document.querySelector('[data-qa="update-available-dialog"]')),
+      modalMode: document.querySelector('[data-qa="template-modal"]')?.dataset.mode,
+      dirty: document.querySelector('[data-qa="template-modal"]')?.dataset.dirty,
+      draft: document.querySelector('[data-qa="template-modal"] .title-input')?.value,
+    }))()`),
+    {
+      updateState: 'available',
+      updatePromptOpen: false,
+      modalMode: 'create',
+      dirty: 'true',
+      draft: 'QA deferred template draft',
+    },
+    'An available update must wait behind a dirty template editor without replacing its draft',
+  )
+  await runIn(templateConflictWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await waitFor(templateConflictWindow, `Boolean(document.querySelector('[data-qa="update-available-dialog"]'))
+    && !document.querySelector('[data-qa="template-modal"]')`, 'deferred template update prompt after editor close')
+
+  await runIn(templateConflictWindow, `(() => {
+    document.querySelector('.main-shell').inert = false
+    document.querySelector('[data-qa="template-form-toggle"]')?.click()
+  })()`)
+  await waitFor(templateConflictWindow, `Boolean(document.querySelector('[data-qa="template-modal"]'))`, 'template modal under update prompt')
+  await runIn(templateConflictWindow, `(() => {
+    const input = document.querySelector('[data-qa="template-modal"] .title-input')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, 'QA template Escape sentinel')
+    input?.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await waitFor(templateConflictWindow, `document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'true'`, 'dirty template Escape sentinel')
+  await runIn(templateConflictWindow, `(() => {
+    const target = document.querySelector('[data-qa="update-dialog-later"]')
+    target?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+    }))
+  })()`)
+  await waitFor(templateConflictWindow, `!document.querySelector('[data-qa="update-available-dialog"]')`, 'template update prompt Escape dismissal')
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.deepEqual(
+    await runIn(templateConflictWindow, `(() => ({
+      modalOpen: Boolean(document.querySelector('[data-qa="template-modal"]')),
+      dirty: document.querySelector('[data-qa="template-modal"]')?.dataset.dirty,
+      draft: document.querySelector('[data-qa="template-modal"] .title-input')?.value,
+    }))()`),
+    { modalOpen: true, dirty: 'true', draft: 'QA template Escape sentinel' },
+    'Escape handled by the update prompt must not also close the underlying template editor',
+  )
+  await runIn(templateConflictWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await waitFor(templateConflictWindow, `!document.querySelector('[data-qa="template-modal"]')`, 'template conflict cleanup')
 
   qaStage = 'cleanup'
   window.destroy()
   latestWindow.destroy()
   startupWindow.destroy()
+  taskConflictWindow.destroy()
+  templateConflictWindow.destroy()
   clearTimeout(watchdog)
   app.quit()
 }).catch((error) => {

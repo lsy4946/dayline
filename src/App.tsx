@@ -1363,12 +1363,18 @@ function TaskModal({
   const unsavedContinueRef = useRef<HTMLButtonElement>(null)
   const unsavedReturnFocusRef = useRef<HTMLElement | null>(null)
   const saveInProgressRef = useRef(false)
-  const createBaselineRef = useRef({
+  const draftBaselineRef = useRef<TaskDraft & { completed: boolean }>({
+    title: '',
+    note: '',
     startDate: initialStartDate,
     dueDate: initialEndDate,
+    dueTime: null,
     color: 'coral' as TaskColor,
     tagId: defaultTagId,
+    subTasks: [],
+    completed: false,
   })
+  const editorSession = open ? task?.id ?? '__new-task__' : null
 
   useEffect(() => {
     if (!open || !backdropRef.current) return
@@ -1387,31 +1393,40 @@ function TaskModal({
   }, [open])
 
   useEffect(() => {
-    if (!open) return
-    setTitle(task?.title ?? '')
-    setNote(task?.note ?? '')
-    setStartDate(task?.startDate ?? initialStartDate)
-    setDueDate(task?.dueDate ?? initialEndDate)
-    setTimeEnabled(Boolean(task?.dueTime))
-    setDueTime(task?.dueTime ?? '09:00')
-    setColor(task?.color ?? 'coral')
-    setTagId(task?.tagId ?? defaultTagId)
-    setCompleted(task?.completed ?? false)
+    if (!editorSession) return
+    const openingSubTasks = (task?.subTasks ?? []).map((subTask) => ({ ...subTask }))
+    const openingDraft: TaskDraft & { completed: boolean } = {
+      title: task?.title ?? '',
+      note: task?.note ?? '',
+      startDate: task?.startDate ?? initialStartDate,
+      dueDate: task?.dueDate ?? initialEndDate,
+      dueTime: task?.dueTime ?? null,
+      color: task?.color ?? 'coral',
+      tagId: task?.tagId ?? defaultTagId,
+      subTasks: openingSubTasks,
+      completed: task?.completed ?? false,
+    }
+    setTitle(openingDraft.title)
+    setNote(openingDraft.note)
+    setStartDate(openingDraft.startDate)
+    setDueDate(openingDraft.dueDate)
+    setTimeEnabled(Boolean(openingDraft.dueTime))
+    setDueTime(openingDraft.dueTime ?? '09:00')
+    setColor(openingDraft.color)
+    setTagId(openingDraft.tagId)
+    setCompleted(openingDraft.completed)
     setParentStateTouched(false)
-    setSubTasks(task?.subTasks ?? [])
+    setSubTasks(openingSubTasks)
     setNewSubTaskTitle('')
     setConfirmDelete(false)
     setConfirmUnsaved(false)
     saveInProgressRef.current = false
-    createBaselineRef.current = {
-      startDate: initialStartDate,
-      dueDate: initialEndDate,
-      color: 'coral',
-      tagId: defaultTagId,
-    }
+    draftBaselineRef.current = openingDraft
     const timer = window.setTimeout(() => titleInputRef.current?.focus(), 90)
     return () => window.clearTimeout(timer)
-  }, [open, task, initialStartDate, initialEndDate, defaultTagId])
+    // Initialize once per open editor session. Store broadcasts for the same task
+    // must not replace a draft while the user is composing it.
+  }, [editorSession])
 
   useEffect(() => {
     if (!open) return
@@ -1438,14 +1453,26 @@ function TaskModal({
     && dueDate >= startDate
     && subTasks.every((subTask) => subTask.title.trim()),
   )
-  const createDirty = !task && (
-    Boolean(title || note || newSubTaskTitle)
-    || startDate !== createBaselineRef.current.startDate
-    || dueDate !== createBaselineRef.current.dueDate
-    || timeEnabled
-    || color !== createBaselineRef.current.color
-    || tagId !== createBaselineRef.current.tagId
-    || subTasks.length > 0
+  const baseline = draftBaselineRef.current
+  const baselineSubTasksById = new Map(baseline.subTasks.map((subTask) => [subTask.id, subTask]))
+  const subTasksDirty = subTasks.length !== baseline.subTasks.length
+    || subTasks.some((subTask) => {
+      const openingSubTask = baselineSubTasksById.get(subTask.id)
+      return !openingSubTask
+        || subTask.title.trim() !== openingSubTask.title
+        || subTask.completed !== openingSubTask.completed
+    })
+  const draftDirty = (
+    title.trim() !== baseline.title.trim()
+    || note.trim() !== baseline.note.trim()
+    || startDate !== baseline.startDate
+    || dueDate !== baseline.dueDate
+    || (timeEnabled ? dueTime : null) !== baseline.dueTime
+    || color !== baseline.color
+    || tagId !== baseline.tagId
+    || completed !== baseline.completed
+    || subTasksDirty
+    || Boolean(newSubTaskTitle.trim())
   )
 
   const saveDraft = () => {
@@ -1496,7 +1523,7 @@ function TaskModal({
   }
 
   const requestBackdropClose = () => {
-    if (task || !createDirty) {
+    if (!draftDirty) {
       onClose()
       return
     }
@@ -1581,7 +1608,7 @@ function TaskModal({
         className="task-modal"
         data-qa="task-modal"
         data-mode={task ? 'edit' : 'create'}
-        data-dirty={!task ? createDirty : undefined}
+        data-dirty={draftDirty}
         role="dialog"
         aria-modal="true"
         aria-hidden={confirmDelete || confirmUnsaved || undefined}
@@ -1842,7 +1869,7 @@ function TaskModal({
         </form>
       </section>
 
-      {!task && confirmUnsaved && (
+      {confirmUnsaved && (
         <div
           className="delete-confirm-backdrop"
           role="presentation"
@@ -1867,7 +1894,7 @@ function TaskModal({
             <header>
               <div>
                 <span className="eyebrow">UNSAVED SCHEDULE</span>
-                <h3 id="unsaved-task-title">저장하지 않은 일정</h3>
+                <h3 id="unsaved-task-title">저장하지 않은 변경 사항</h3>
               </div>
               <button
                 ref={unsavedContinueRef}
@@ -1891,20 +1918,16 @@ function TaskModal({
                 data-qa="unsaved-task-discard"
                 onClick={onClose}
               >
-                작성 취소
+                저장하지 않고 닫기
               </button>
               <button
                 type="button"
                 className="primary-button"
                 data-qa="unsaved-task-save"
                 disabled={!validDraft}
-                onClick={() => {
-                  if (saveDraft()) return
-                  setConfirmUnsaved(false)
-                  window.setTimeout(() => titleInputRef.current?.focus(), 0)
-                }}
+                onClick={saveDraft}
               >
-                <Save size={14} /> 일정 추가
+                <Save size={14} /> {task ? '변경 저장' : '일정 추가'}
               </button>
             </div>
           </section>
@@ -2104,14 +2127,14 @@ function updateStatusCopy(state: UpdateState) {
     case 'available':
       return {
         title: `${versionLabel(state.availableVersion)} 업데이트를 사용할 수 있어요`,
-        description: '다운로드한 뒤 앱을 재시작하면 업데이트가 적용됩니다.',
+        description: '업데이트를 누르면 다운로드 후 자동으로 설치하고 다시 시작합니다.',
       }
     case 'not-available':
       return { title: '현재 최신 버전을 사용하고 있어요', description: `${versionLabel(state.currentVersion)}이 최신 버전입니다.` }
     case 'downloading':
       return { title: '업데이트를 다운로드하고 있어요', description: '작업을 계속해도 괜찮아요.' }
     case 'downloaded':
-      return { title: '업데이트 설치 준비가 끝났어요', description: '앱을 재시작하면 기존 데이터는 그대로 유지됩니다.' }
+      return { title: '업데이트를 설치할 준비가 됐어요', description: '자동 설치가 이어지지 않았다면 아래 버튼으로 설치하고 다시 시작하세요.' }
     case 'installing':
       return { title: '업데이트를 설치하고 있어요', description: '잠시 후 앱이 새 버전으로 다시 시작됩니다.' }
     case 'error':
@@ -2312,7 +2335,7 @@ function UpdatePanel({
               disabled={!state.canInstall}
               onClick={onInstall}
             >
-              <RefreshCw size={14} /> 재시작하여 설치
+              <RefreshCw size={14} /> 설치하고 다시 시작
             </button>
           )}
         </div>
@@ -2390,6 +2413,8 @@ function UpdateAvailableDialog({
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault()
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
             onLater()
             return
           }
@@ -2408,14 +2433,15 @@ function UpdateAvailableDialog({
             {installing
               ? '잠시 후 앱이 새 버전으로 다시 시작됩니다. 창을 강제로 닫지 마세요.'
               : downloaded
-              ? '앱을 재시작해 설치할 수 있어요. 작성한 일정과 설정은 그대로 유지됩니다.'
+              ? '자동 설치가 이어지지 않았다면 아래 버튼으로 설치하고 다시 시작하세요. 일정과 설정은 그대로 유지됩니다.'
               : downloading
-                ? '업데이트를 다운로드하고 있어요. 완료되면 재시작하여 설치할 수 있습니다.'
+                ? '업데이트를 다운로드하고 있어요. 완료되면 자동으로 설치하고 다시 시작합니다.'
                 : failed
                   ? '다운로드하지 못했어요. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.'
-                  : '지금 다운로드하거나 나중에 업데이트 메뉴에서 진행할 수 있어요.'}
+                  : '업데이트를 누르면 다운로드 후 자동으로 설치하고 다시 시작합니다.'}
           </p>
           {state.releaseName && <strong className="update-dialog-release-name">{state.releaseName}</strong>}
+          {state.releaseNotes && <ReleaseNotesContent notes={state.releaseNotes} />}
           {downloading && (
             <div
               className="update-progress"
@@ -2454,7 +2480,7 @@ function UpdateAvailableDialog({
               disabled={!state.canInstall}
               onClick={onInstall}
             >
-              <RefreshCw size={14} /> 재시작하여 설치
+              <RefreshCw size={14} /> 설치하고 다시 시작
             </button>
           )}
         </div>
@@ -2740,24 +2766,47 @@ function TemplateModal({
   const [dueTime, setDueTime] = useState('09:00')
   const [tagId, setTagId] = useState<string | null>(defaultTag?.id ?? null)
   const [legacyColor, setLegacyColor] = useState<TaskColor>(defaultTag?.legacyColor ?? 'coral')
+  const [confirmUnsaved, setConfirmUnsaved] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
   const backdropRef = useRef<HTMLDivElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
+  const unsavedContinueRef = useRef<HTMLButtonElement>(null)
+  const unsavedReturnFocusRef = useRef<HTMLElement | null>(null)
   const saveInProgressRef = useRef(false)
+  const draftBaselineRef = useRef<TemplateDraft>({
+    title: '',
+    note: '',
+    dueTime: null,
+    tagId: defaultTag?.id ?? null,
+    legacyColor: defaultTag?.legacyColor ?? 'coral',
+    durationDays: 1,
+    subTaskTitles: [],
+  })
 
   const editorSession = open ? template?.id ?? '__new-template__' : null
 
   useEffect(() => {
     if (!editorSession) return
-    setTitle(template?.title ?? '')
-    setNote(template?.note ?? '')
-    setSubTaskText(template?.subTaskTitles.join('\n') ?? '')
-    setDurationDays(template?.durationDays ?? 1)
-    setTimeEnabled(Boolean(template?.dueTime))
-    setDueTime(template?.dueTime ?? '09:00')
-    setTagId(template?.tagId ?? defaultTag?.id ?? null)
-    setLegacyColor(template?.legacyColor ?? defaultTag?.legacyColor ?? 'coral')
+    const openingDraft: TemplateDraft = {
+      title: template?.title ?? '',
+      note: template?.note ?? '',
+      dueTime: template?.dueTime ?? null,
+      tagId: template?.tagId ?? defaultTag?.id ?? null,
+      legacyColor: template?.legacyColor ?? defaultTag?.legacyColor ?? 'coral',
+      durationDays: clamp(Math.round(template?.durationDays ?? 1), 1, 365),
+      subTaskTitles: (template?.subTaskTitles ?? []).map((item) => item.trim()).filter(Boolean),
+    }
+    setTitle(openingDraft.title)
+    setNote(openingDraft.note)
+    setSubTaskText(openingDraft.subTaskTitles.join('\n'))
+    setDurationDays(openingDraft.durationDays)
+    setTimeEnabled(Boolean(openingDraft.dueTime))
+    setDueTime(openingDraft.dueTime ?? '09:00')
+    setTagId(openingDraft.tagId)
+    setLegacyColor(openingDraft.legacyColor)
+    setConfirmUnsaved(false)
     saveInProgressRef.current = false
+    draftBaselineRef.current = openingDraft
     const focusTimer = window.setTimeout(() => titleInputRef.current?.focus(), 60)
     return () => window.clearTimeout(focusTimer)
     // Initialize once per open editor session. Live tag/order broadcasts must
@@ -2783,29 +2832,66 @@ function TemplateModal({
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      onClose()
+      if (confirmUnsaved) {
+        setConfirmUnsaved(false)
+        window.setTimeout(() => unsavedReturnFocusRef.current?.focus(), 0)
+      } else onClose()
     }
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
-  }, [onClose, open])
+  }, [confirmUnsaved, onClose, open])
 
   if (!open) return null
 
+  const currentDraft: TemplateDraft = {
+    title: title.trim(),
+    note: note.trim(),
+    dueTime: timeEnabled ? dueTime : null,
+    tagId,
+    legacyColor,
+    durationDays: clamp(Math.round(durationDays), 1, 365),
+    subTaskTitles: subTaskText.split('\n').map((item) => item.trim()).filter(Boolean),
+  }
+  const baseline = draftBaselineRef.current
+  const draftDirty = currentDraft.title !== baseline.title.trim()
+    || currentDraft.note !== baseline.note.trim()
+    || currentDraft.dueTime !== baseline.dueTime
+    || currentDraft.tagId !== baseline.tagId
+    || currentDraft.legacyColor !== baseline.legacyColor
+    || currentDraft.durationDays !== baseline.durationDays
+    || currentDraft.subTaskTitles.length !== baseline.subTaskTitles.length
+    || currentDraft.subTaskTitles.some((item, index) => item !== baseline.subTaskTitles[index])
+  const validDraft = Boolean(currentDraft.title)
+
+  const saveDraft = () => {
+    if (!validDraft || saveInProgressRef.current) return false
+    saveInProgressRef.current = true
+    try {
+      const saved = onSave(currentDraft, template?.id, template ?? undefined)
+      if (saved) onClose()
+      else saveInProgressRef.current = false
+      return saved
+    } catch (error) {
+      saveInProgressRef.current = false
+      throw error
+    }
+  }
+
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (!title.trim() || saveInProgressRef.current) return
-    saveInProgressRef.current = true
-    const saved = onSave({
-      title: title.trim(),
-      note: note.trim(),
-      dueTime: timeEnabled ? dueTime : null,
-      tagId,
-      legacyColor,
-      durationDays: clamp(Math.round(durationDays), 1, 365),
-      subTaskTitles: subTaskText.split('\n').map((item) => item.trim()).filter(Boolean),
-    }, template?.id, template ?? undefined)
-    if (saved) onClose()
-    else saveInProgressRef.current = false
+    saveDraft()
+  }
+
+  const requestBackdropClose = () => {
+    if (!draftDirty) {
+      onClose()
+      return
+    }
+    unsavedReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : titleInputRef.current
+    setConfirmUnsaved(true)
+    window.setTimeout(() => unsavedContinueRef.current?.focus(), 0)
   }
 
   return (
@@ -2815,16 +2901,19 @@ function TemplateModal({
       data-qa="template-modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget) requestBackdropClose()
       }}
     >
       <section
         className="task-modal template-modal"
         data-qa="template-modal"
         data-mode={template ? 'edit' : 'create'}
+        data-dirty={draftDirty}
         role="dialog"
         aria-modal="true"
+        aria-hidden={confirmUnsaved || undefined}
         aria-labelledby="template-modal-title"
+        inert={confirmUnsaved}
         tabIndex={-1}
         onKeyDown={trapDialogFocus}
         onMouseDown={(event) => event.stopPropagation()}
@@ -2934,13 +3023,78 @@ function TemplateModal({
             <span>날짜는 캘린더에 템플릿을 놓을 때 정해져요.</span>
             <div>
               <button type="button" className="secondary-button" data-qa="template-form-cancel" onClick={onClose}>취소</button>
-              <button type="submit" className="primary-button" disabled={!title.trim()}>
+              <button type="submit" className="primary-button" disabled={!validDraft}>
                 {template ? '변경 저장' : '반복 일정 추가'}
               </button>
             </div>
           </footer>
         </form>
       </section>
+
+      {confirmUnsaved && (
+        <div
+          className="delete-confirm-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            event.stopPropagation()
+            if (event.target !== event.currentTarget) return
+            setConfirmUnsaved(false)
+            window.setTimeout(() => unsavedReturnFocusRef.current?.focus(), 0)
+          }}
+        >
+          <section
+            className="delete-confirm-dialog unsaved-task-dialog"
+            data-qa="unsaved-template-confirm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="unsaved-template-title"
+            aria-describedby="unsaved-template-description"
+            tabIndex={-1}
+            onKeyDown={trapDialogFocus}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <div>
+                <span className="eyebrow">UNSAVED TEMPLATE</span>
+                <h3 id="unsaved-template-title">저장하지 않은 변경 사항</h3>
+              </div>
+              <button
+                ref={unsavedContinueRef}
+                type="button"
+                className="icon-button"
+                aria-label="계속 작성"
+                title="계속 작성"
+                onClick={() => {
+                  setConfirmUnsaved(false)
+                  window.setTimeout(() => unsavedReturnFocusRef.current?.focus(), 0)
+                }}
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <p id="unsaved-template-description">변경 사항이 있습니다. 저장하시겠습니까?</p>
+            <div className="delete-confirm-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                data-qa="unsaved-template-discard"
+                onClick={onClose}
+              >
+                저장하지 않고 닫기
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                data-qa="unsaved-template-save"
+                disabled={!validDraft}
+                onClick={saveDraft}
+              >
+                <Save size={14} /> {template ? '변경 저장' : '반복 일정 추가'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }
@@ -3222,11 +3376,19 @@ function MainView(props: SharedViewProps) {
 
   useEffect(() => {
     if (updateState.status !== 'available' && updateState.status !== 'downloaded') return
+    if (modalOpen || templateModalOpen || recoveryOpen || helpOpen) return
     const version = updateState.availableVersion
     if (!version || promptedUpdateVersionsRef.current.has(version)) return
     promptedUpdateVersionsRef.current.add(version)
     setUpdatePromptOpen(true)
-  }, [updateState.availableVersion, updateState.status])
+  }, [
+    helpOpen,
+    modalOpen,
+    recoveryOpen,
+    templateModalOpen,
+    updateState.availableVersion,
+    updateState.status,
+  ])
 
   const runUpdateAction = useCallback(async (action: 'check' | 'download' | 'install') => {
     const updates = getRendererUpdatesApi()
@@ -3264,13 +3426,13 @@ function MainView(props: SharedViewProps) {
   }, [loading])
 
   useEffect(() => {
-    if (!railPanel || modalOpen || templateModalOpen) return
+    if (!railPanel || modalOpen || templateModalOpen || updatePromptOpen) return
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') closeRailPanel()
     }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [closeRailPanel, modalOpen, railPanel, templateModalOpen])
+  }, [closeRailPanel, modalOpen, railPanel, templateModalOpen, updatePromptOpen])
 
   useEffect(() => {
     const validIds = new Set(taskTags.map((tag) => tag.id))

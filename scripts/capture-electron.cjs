@@ -1810,6 +1810,43 @@ app.whenReady().then(async () => {
     'Valid prompt Shift+Tab must wrap to Save',
   )
   await runIn(mainWindow, `(() => {
+    const nativeSetItem = Storage.prototype.setItem
+    window.__daylineQa.restoreStorageWrites = () => { Storage.prototype.setItem = nativeSetItem }
+    window.__daylineQa.storageWriteFailures = 0
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'dayline-browser-store-v1') {
+        window.__daylineQa.storageWriteFailures += 1
+        throw new DOMException('QA storage write failure', 'QuotaExceededError')
+      }
+      return nativeSetItem.call(this, key, value)
+    }
+    return true
+  })()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-task-save"]')?.click()`)
+  const failedOutsideTaskSave = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-task-confirm"]')
+    const modal = document.querySelector('[data-qa="task-modal"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-task-save"]')
+    if (!prompt || !modal || !save || window.__daylineQa.storageWriteFailures !== 1) return null
+    return {
+      promptOpen: true,
+      dirty: modal.dataset.dirty,
+      inert: modal.inert,
+      title: modal.querySelector('.title-input')?.value,
+      pendingSubTask: modal.querySelector('[aria-label="subtask 추가"]')?.value,
+      retryEnabled: !save.disabled,
+    }
+  })()`, 'failed outside task save stays recoverable')
+  assert.deepEqual(failedOutsideTaskSave, {
+    promptOpen: true,
+    dirty: 'true',
+    inert: true,
+    title: outsideSaveTitle,
+    pendingSubTask: '저장과 함께 추가될 세부 일정',
+    retryEnabled: true,
+  }, 'A failed save must preserve the full dirty draft and allow retry')
+  await runIn(mainWindow, `window.__daylineQa.restoreStorageWrites?.()`)
+  await runIn(mainWindow, `(() => {
     const save = document.querySelector('[data-qa="unsaved-task-save"]')
     save?.click()
     save?.click()
@@ -2997,6 +3034,132 @@ app.whenReady().then(async () => {
   assert.equal(modalAccessibility.outsideInert, true, 'Task modal background must be inert')
   assert.equal(modalAccessibility.wrappedBackward, true, 'Shift+Tab must wrap to the modal end')
   assert.equal(modalAccessibility.wrappedForward, true, 'Tab must wrap to the modal start')
+  const taskBeforeOutsideEdit = await runIn(mainWindow, `(() => {
+    const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.tasks?.find((candidate) => candidate.id === '${editableTask.id}')
+    return task ? { note: task.note, subTaskCount: task.subTasks.length } : null
+  })()`)
+  assert.ok(taskBeforeOutsideEdit, 'Task edit backdrop QA requires the persisted opening task')
+  assert.equal(
+    await runIn(mainWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty`),
+    'false',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && !document.querySelector('[data-qa="unsaved-task-confirm"]')
+      && document.activeElement === document.querySelector(
+        '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+      )`,
+    'clean task edit outside close and focus restoration',
+  )
+
+  await runIn(mainWindow, `document.querySelector(
+    '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+  )?.click()`)
+  await waitForRenderer(mainWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'false'`, 'reopened clean task edit')
+  await runIn(mainWindow, `window.__daylineQa.setValue(
+    '[data-qa="task-modal"] [aria-label="일정 메모"]',
+    '바깥 클릭 편집 취소 검증',
+  )`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')?.focus()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const dirtyTaskEditPrompt = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-task-confirm"]')
+    const modal = document.querySelector('[data-qa="task-modal"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !modal || !continueButton) return null
+    return {
+      mode: modal.dataset.mode,
+      dirty: modal.dataset.dirty,
+      role: prompt.getAttribute('role'),
+      text: prompt.querySelector('#unsaved-task-description')?.textContent?.trim(),
+      inert: modal.inert,
+      ariaHidden: modal.getAttribute('aria-hidden'),
+      focusOnContinue: document.activeElement === continueButton,
+    }
+  })()`, 'dirty task edit confirmation')
+  assert.deepEqual(dirtyTaskEditPrompt, {
+    mode: 'edit',
+    dirty: 'true',
+    role: 'alertdialog',
+    text: '변경 사항이 있습니다. 저장하시겠습니까?',
+    inert: true,
+    ariaHidden: 'true',
+    focusOnContinue: true,
+  })
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-task-confirm"] [aria-label="계속 작성"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="unsaved-task-confirm"]')
+      && document.querySelector('[data-qa="task-modal"]')?.inert === false
+      && document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')?.value === '바깥 클릭 편집 취소 검증'
+      && document.activeElement === document.querySelector('[data-qa="task-modal"] [aria-label="일정 메모"]')`,
+    'continue dirty task edit with preserved draft and focus',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="unsaved-task-confirm"]'))`, 'reopened dirty task edit confirmation')
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-task-discard"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="task-modal"]')
+      && document.activeElement === document.querySelector(
+        '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+      )`,
+    'discard dirty task edit and restore trigger focus',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.tasks?.find((task) => task.id === '${editableTask.id}')?.note`),
+    taskBeforeOutsideEdit.note,
+    'Discarding a dirty task edit must not persist it',
+  )
+
+  const outsideEditNote = '바깥 클릭 편집 저장 검증'
+  const outsideEditPendingSubTask = '편집 저장과 함께 추가될 세부 일정'
+  await runIn(mainWindow, `document.querySelector(
+    '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+  )?.click()`)
+  await waitForRenderer(mainWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.mode === 'edit'`, 'task edit for outside save')
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="일정 메모"]', ${JSON.stringify(outsideEditNote)})`)
+  await runIn(mainWindow, `window.__daylineQa.setValue('[data-qa="task-modal"] [aria-label="subtask 추가"]', ${JSON.stringify(outsideEditPendingSubTask)})`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="task-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="unsaved-task-confirm"] [data-qa="unsaved-task-save"]:not([disabled])'))`, 'valid dirty task edit save')
+  await runIn(mainWindow, `(() => {
+    const save = document.querySelector('[data-qa="unsaved-task-save"]')
+    save?.click()
+    save?.click()
+    return true
+  })()`)
+  await waitForRenderer(mainWindow, `!document.querySelector('[data-qa="task-modal"]')`, 'outside task edit saved once')
+  const outsideEditedTask = await runIn(mainWindow, `(() => {
+    const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.tasks?.find((candidate) => candidate.id === '${editableTask.id}')
+    return task ? {
+      note: task.note,
+      matchingSubTasks: task.subTasks.filter((subTask) => subTask.title === ${JSON.stringify(outsideEditPendingSubTask)}).length,
+      subTaskCount: task.subTasks.length,
+      focusRestored: document.activeElement === document.querySelector(
+        '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+      ),
+    } : null
+  })()`)
+  assert.deepEqual(outsideEditedTask, {
+    note: outsideEditNote,
+    matchingSubTasks: 1,
+    subTaskCount: taskBeforeOutsideEdit.subTaskCount + 1,
+    focusRestored: true,
+  }, 'A double-clicked edit Save must persist once and include the pending subtask')
+
+  await runIn(mainWindow, `document.querySelector(
+    '[data-qa="schedule-section"] .task-row[data-task-id="${editableTask.id}"] .task-row-main',
+  )?.click()`)
+  await waitForRenderer(mainWindow, `document.querySelector('[data-qa="task-modal"]')?.dataset.dirty === 'false'`, 'reopened task after outside edit save')
   const originalDetail = await runIn(mainWindow, `({
     title: document.querySelector('.task-modal .title-input')?.value,
     startDate: document.querySelector('.task-modal [aria-label="시작 날짜"]')?.value,
@@ -3658,11 +3821,37 @@ app.whenReady().then(async () => {
   await waitForRenderer(
     mainWindow,
     `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'
+      && document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'false'
       && document.activeElement === document.querySelector(
         '[data-qa="template-form"] [aria-label="템플릿 제목"]',
       )
       && document.querySelector('[data-qa="template-panel"]')?.inert === true`,
     'opened focused template create modal',
+  )
+  const templateCountBeforeOutsideCreate = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.taskTemplates?.length ?? -1`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-modal"]')
+      && !document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.activeElement === document.querySelector('[data-qa="template-form-toggle"]')`,
+    'clean template create outside close and focus restoration',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.taskTemplates?.length`),
+    templateCountBeforeOutsideCreate,
+    'Closing an untouched template create modal must not add a template',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'create'
+      && document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'false'`,
+    'reopened clean template create modal',
   )
   const templateTextareaOrder = await runIn(
     mainWindow,
@@ -3689,16 +3878,66 @@ app.whenReady().then(async () => {
   )
   await runIn(
     mainWindow,
-    `window.__daylineQa.setValue('[data-qa="template-form"] [aria-label="템플릿 제목"]', '저장하면 안 되는 템플릿')`,
+    `window.__daylineQa.setValue('[data-qa="template-form"] [aria-label="템플릿 메모"]', '제목 없는 저장 불가 템플릿')`,
   )
-  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form"] [aria-label="템플릿 메모"]')?.focus()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const invalidTemplatePrompt = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-template-confirm"]')
+    const modal = document.querySelector('[data-qa="template-modal"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-template-save"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !modal || !save || !continueButton) return null
+    return {
+      role: prompt.getAttribute('role'),
+      modal: prompt.getAttribute('aria-modal'),
+      text: prompt.querySelector('#unsaved-template-description')?.textContent?.trim(),
+      saveDisabled: save.disabled,
+      templateModalInert: modal.inert,
+      templateModalAriaHidden: modal.getAttribute('aria-hidden'),
+      focusOnContinue: document.activeElement === continueButton,
+    }
+  })()`, 'invalid dirty template confirmation')
+  assert.deepEqual(invalidTemplatePrompt, {
+    role: 'alertdialog',
+    modal: 'true',
+    text: '변경 사항이 있습니다. 저장하시겠습니까?',
+    saveDisabled: true,
+    templateModalInert: true,
+    templateModalAriaHidden: 'true',
+    focusOnContinue: true,
+  })
+  await runIn(mainWindow, `window.__daylineQa.key(
+    '[data-qa="unsaved-template-confirm"] [aria-label="계속 작성"]',
+    'Escape',
+  )`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'true'
+      && document.querySelector('[data-qa="template-modal"]')?.inert === false
+      && document.querySelector('[data-qa="template-form"] [aria-label="템플릿 메모"]')?.value === '제목 없는 저장 불가 템플릿'
+      && document.activeElement === document.querySelector(
+        '[data-qa="template-form"] [aria-label="템플릿 메모"]',
+      )`,
+    'Escape continues invalid template draft with focus restored',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="unsaved-template-confirm"]'))`, 'reopened invalid template confirmation')
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-template-discard"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('[data-qa="template-modal"]')
-      && document.activeElement === document.querySelector('[data-qa="template-form-toggle"]')
-      && ![...document.querySelectorAll('[data-template-id] strong')]
-        .some((title) => title.textContent === '저장하면 안 되는 템플릿')`,
-    'cancelled template create modal without mutation',
+      && !document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.activeElement === document.querySelector('[data-qa="template-form-toggle"]')`,
+    'discard dirty template create and restore trigger focus',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.taskTemplates?.length`),
+    templateCountBeforeOutsideCreate,
+    'Discarding a dirty template draft must not add a template',
   )
   await runIn(mainWindow, `document.querySelector('[data-qa="template-form-toggle"]')?.click()`)
   await waitForRenderer(
@@ -3755,10 +3994,64 @@ app.whenReady().then(async () => {
     templateChildren,
     `Normal per-line typing must preserve both template subtask lines; got ${JSON.stringify(typedTemplateChildren)}`,
   )
-  await runIn(
-    mainWindow,
-    `window.__daylineQa.clickButtonText('[data-qa="template-form"]', '반복 일정 추가')`,
-  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const validTemplatePrompt = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-template-confirm"]')
+    const modal = document.querySelector('[data-qa="template-modal"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-template-save"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !modal || !save || save.disabled || !continueButton) return null
+    return {
+      dirty: modal.dataset.dirty,
+      inert: modal.inert,
+      focusOnContinue: document.activeElement === continueButton,
+    }
+  })()`, 'valid template create confirmation')
+  assert.deepEqual(validTemplatePrompt, { dirty: 'true', inert: true, focusOnContinue: true })
+  await runIn(mainWindow, `(() => {
+    const nativeSetItem = Storage.prototype.setItem
+    window.__daylineQa.restoreStorageWrites = () => { Storage.prototype.setItem = nativeSetItem }
+    window.__daylineQa.storageWriteFailures = 0
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'dayline-browser-store-v1') {
+        window.__daylineQa.storageWriteFailures += 1
+        throw new DOMException('QA template storage write failure', 'QuotaExceededError')
+      }
+      return nativeSetItem.call(this, key, value)
+    }
+    return true
+  })()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-template-save"]')?.click()`)
+  const failedTemplateSave = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-template-confirm"]')
+    const modal = document.querySelector('[data-qa="template-modal"]')
+    const save = prompt?.querySelector('[data-qa="unsaved-template-save"]')
+    if (!prompt || !modal || !save || window.__daylineQa.storageWriteFailures !== 1) return null
+    return {
+      promptOpen: true,
+      dirty: modal.dataset.dirty,
+      inert: modal.inert,
+      title: modal.querySelector('[aria-label="템플릿 제목"]')?.value,
+      children: modal.querySelector('[aria-label="템플릿 세부 할 일"]')?.value,
+      retryEnabled: !save.disabled,
+    }
+  })()`, 'failed template create save stays recoverable')
+  assert.deepEqual(failedTemplateSave, {
+    promptOpen: true,
+    dirty: 'true',
+    inert: true,
+    title: 'QA UI 템플릿',
+    children: templateChildren,
+    retryEnabled: true,
+  })
+  await runIn(mainWindow, `window.__daylineQa.restoreStorageWrites?.()`)
+  await runIn(mainWindow, `(() => {
+    const save = document.querySelector('[data-qa="unsaved-template-save"]')
+    save?.click()
+    save?.click()
+    return true
+  })()`)
   const uiTemplateId = await waitForRenderer(
     mainWindow,
     `(() => {
@@ -3768,7 +4061,20 @@ app.whenReady().then(async () => {
         ? card.dataset.templateId
         : ''
     })()`,
-    'template UI create and automatic modal close',
+    'template outside-click create and automatic modal close',
+  )
+  assert.deepEqual(
+    await runIn(mainWindow, `(() => {
+      const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      const matches = (store?.taskTemplates ?? []).filter((template) => template.title === 'QA UI 템플릿')
+      return {
+        matches: matches.length,
+        total: store?.taskTemplates?.length,
+        focusRestored: document.activeElement === document.querySelector('[data-qa="template-form-toggle"]'),
+      }
+    })()`),
+    { matches: 1, total: templateCountBeforeOutsideCreate + 1, focusRestored: true },
+    'A repeated template Save click must create exactly one template and restore focus',
   )
   await runIn(
     mainWindow,
@@ -3781,10 +4087,27 @@ app.whenReady().then(async () => {
   await waitForRenderer(
     mainWindow,
     `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'edit'
+      && document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'false'
       && document.querySelector(
       '[data-qa="template-form"] [aria-label="템플릿 세부 할 일"]',
     )?.value === ${JSON.stringify(templateChildren)}`,
     'template multiline child text persistence',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="template-modal"]')
+      && !document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.activeElement === document.querySelector('[aria-label="QA UI 템플릿 수정"]')`,
+    'clean template edit outside close and focus restoration',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="QA UI 템플릿 수정"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="template-modal"]')?.dataset.mode === 'edit'
+      && document.querySelector('[data-qa="template-modal"]')?.dataset.dirty === 'false'`,
+    'reopened clean template edit modal',
   )
   await runIn(
     mainWindow,
@@ -3793,13 +4116,54 @@ app.whenReady().then(async () => {
       '저장하면 안 되는 수정',
     )`,
   )
-  await runIn(mainWindow, `document.querySelector('[data-qa="template-form-cancel"]')?.click()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-form"] [aria-label="템플릿 제목"]')?.focus()`)
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  const dirtyTemplateEditPrompt = await waitForRenderer(mainWindow, `(() => {
+    const prompt = document.querySelector('[data-qa="unsaved-template-confirm"]')
+    const modal = document.querySelector('[data-qa="template-modal"]')
+    const continueButton = prompt?.querySelector('[aria-label="계속 작성"]')
+    if (!prompt || !modal || !continueButton) return null
+    return {
+      mode: modal.dataset.mode,
+      dirty: modal.dataset.dirty,
+      role: prompt.getAttribute('role'),
+      text: prompt.querySelector('#unsaved-template-description')?.textContent?.trim(),
+      inert: modal.inert,
+      ariaHidden: modal.getAttribute('aria-hidden'),
+      focusOnContinue: document.activeElement === continueButton,
+    }
+  })()`, 'dirty template edit confirmation')
+  assert.deepEqual(dirtyTemplateEditPrompt, {
+    mode: 'edit',
+    dirty: 'true',
+    role: 'alertdialog',
+    text: '변경 사항이 있습니다. 저장하시겠습니까?',
+    inert: true,
+    ariaHidden: 'true',
+    focusOnContinue: true,
+  })
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-template-confirm"] [aria-label="계속 작성"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.querySelector('[data-qa="template-modal"]')?.inert === false
+      && document.querySelector('[data-qa="template-form"] [aria-label="템플릿 제목"]')?.value === '저장하면 안 되는 수정'
+      && document.activeElement === document.querySelector(
+        '[data-qa="template-form"] [aria-label="템플릿 제목"]',
+      )`,
+    'continue dirty template edit with draft and focus preserved',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(mainWindow, `Boolean(document.querySelector('[data-qa="unsaved-template-confirm"]'))`, 'reopened dirty template edit confirmation')
+  await runIn(mainWindow, `document.querySelector('[data-qa="unsaved-template-discard"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('[data-qa="template-modal"]')
       && document.querySelector('[data-template-id="${uiTemplateId}"] strong')?.textContent === 'QA UI 템플릿'
       && document.activeElement === document.querySelector('[aria-label="QA UI 템플릿 수정"]')`,
-    'cancelled template edit and focus restoration',
+    'discarded dirty template edit and restored focus',
   )
   await runIn(mainWindow, `document.querySelector('[aria-label="QA UI 템플릿 수정"]')?.click()`)
   await waitForRenderer(
@@ -3815,16 +4179,35 @@ app.whenReady().then(async () => {
       'QA 수정 템플릿',
     )`,
   )
-  await runIn(
+  await runIn(mainWindow, `document.querySelector('[data-qa="template-modal-backdrop"]')
+    ?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))`)
+  await waitForRenderer(
     mainWindow,
-    `window.__daylineQa.clickButtonText('[data-qa="template-form"]', '변경 저장')`,
+    `Boolean(document.querySelector('[data-qa="unsaved-template-confirm"] [data-qa="unsaved-template-save"]:not([disabled])'))
+      && document.querySelector('[data-qa="template-modal"]')?.inert === true`,
+    'valid template edit outside-save confirmation',
   )
+  await runIn(mainWindow, `(() => {
+    const save = document.querySelector('[data-qa="unsaved-template-save"]')
+    save?.click()
+    save?.click()
+    return true
+  })()`)
   await waitForRenderer(
     mainWindow,
     `document.querySelector('[data-template-id="${uiTemplateId}"] strong')?.textContent
       === 'QA 수정 템플릿'
-      && !document.querySelector('[data-qa="template-modal"]')`,
-    'template UI update and modal close',
+      && !document.querySelector('[data-qa="template-modal"]')
+      && !document.querySelector('[data-qa="unsaved-template-confirm"]')
+      && document.activeElement === document.querySelector('[aria-label="QA 수정 템플릿 수정"]')`,
+    'template outside-click update and modal close',
+  )
+  assert.equal(
+    await runIn(mainWindow, `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.taskTemplates?.filter((template) => template.id === '${uiTemplateId}'
+        && template.title === 'QA 수정 템플릿').length`),
+    1,
+    'A repeated edit Save click must update exactly one template once',
   )
 
   qaStage = 'template-reorder-and-gesture-separation'

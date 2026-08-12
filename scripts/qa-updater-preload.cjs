@@ -2,7 +2,7 @@ const { contextBridge } = require('electron')
 
 const baseState = (status, patch = {}) => ({
   status,
-  currentVersion: '0.2.1',
+  currentVersion: '0.3.0',
   availableVersion: null,
   releaseName: null,
   releaseNotes: null,
@@ -16,20 +16,28 @@ const baseState = (status, patch = {}) => ({
 })
 
 const releasePatch = {
-  availableVersion: '0.3.0',
-  releaseName: 'Dayline 0.3.0',
-  releaseNotes: `## 주요 변경
+  availableVersion: '0.3.2',
+  releaseName: 'Dayline 0.3.2',
+  releaseNotes: `## v0.3.1
 
-업데이트 화면에서 변경 사항을 더 읽기 쉽게 확인할 수 있습니다.
+[반복 일정]
+- 반복 일정 템플릿을 캘린더로 드래그할 수 있습니다.
 
-- 캘린더 일정 이동을 개선했습니다.
+[좌측 메뉴]
+- 좌측 메뉴를 완전히 접을 수 있습니다.
 - **최근 삭제** 동작을 다듬었습니다.
+
+## v0.3.2
+
+[업데이트]
+- 누적 변경 사항을 버전별로 표시합니다.
+- 다운로드한 업데이트를 자동 설치하고 다시 시작합니다.
 - [릴리스 보기](https://example.invalid/release)는 안전한 텍스트로 표시됩니다.
 
-### 세부 개선
+[보안 검증]
 
-1. 첫 번째 단계의 동작을 검증합니다.
-2. 두 번째 단계의 동작을 검증합니다.
+1. HTML은 실행하지 않고 텍스트로 표시합니다.
+2. 링크는 클릭 요소가 아닌 읽을 수 있는 텍스트로 표시합니다.
 
 <script>window.__unsafeReleaseNote = true</script>
 
@@ -55,7 +63,7 @@ let current = initialMode === 'available'
   ? baseState('available', releasePatch)
   : baseState('idle')
 const listeners = new Set()
-const calls = { check: 0, download: 0, install: 0 }
+const calls = { check: 0, download: 0, install: 0, installArguments: null }
 const store = {
   version: 4,
   revision: 0,
@@ -95,10 +103,15 @@ contextBridge.exposeInMainWorld('dayline', {
       calls.download += 1
       emit(baseState('downloading', { ...releasePatch, progress: 37, canCheck: false }))
       await new Promise((resolve) => setTimeout(resolve, 90))
-      return emit(baseState('downloaded', { ...releasePatch, progress: 100 }))
+      emit(baseState('downloaded', { ...releasePatch, progress: 100 }))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      calls.install += 1
+      calls.installArguments = [true, true]
+      return emit(baseState('installing', { ...releasePatch, progress: 100, canCheck: false }))
     },
     install: async () => {
       calls.install += 1
+      calls.installArguments = [true, true]
       return emit(baseState('installing', { ...releasePatch, progress: 100, canCheck: false }))
     },
     onStateChanged: (listener) => {
@@ -108,6 +121,8 @@ contextBridge.exposeInMainWorld('dayline', {
   },
   __updateQa: {
     getCalls: () => ({ ...calls }),
+    getState: () => ({ ...current }),
+    available: () => emit(baseState('available', releasePatch)),
     notAvailable: () => emit(baseState('not-available')),
   },
 })

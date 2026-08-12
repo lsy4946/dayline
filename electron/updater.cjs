@@ -1,5 +1,9 @@
 const path = require('node:path')
 
+const MAX_RELEASE_NOTES_LENGTH = 128 * 1024
+const MAX_RELEASE_NOTE_SOURCE_LENGTH = 64 * 1024
+const MAX_RELEASE_NOTE_ENTRIES = 100
+
 const UPDATE_STATUSES = new Set([
   'unsupported',
   'idle',
@@ -33,13 +37,19 @@ function getUpdateSupport({
   return { supported: true, reason: null }
 }
 
-function normalizeReleaseNotes(value) {
-  const text = Array.isArray(value)
-    ? value.map((entry) => entry?.note).filter(Boolean).join('\n\n')
-    : typeof value === 'string' ? value : ''
+function truncateTextSafely(value, maxLength) {
+  if (value.length <= maxLength) return value
+  let truncated = value.slice(0, maxLength)
+  if (/[\uD800-\uDBFF]$/.test(truncated)) truncated = truncated.slice(0, -1)
+  return truncated.trimEnd()
+}
+
+function sanitizeReleaseNoteText(value) {
+  if (typeof value !== 'string') return ''
+  const text = truncateTextSafely(value, MAX_RELEASE_NOTE_SOURCE_LENGTH)
   return text
     .replace(/\r\n?/g, '\n')
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<li\b[^>]*>/gi, '- ')
     .replace(/<\/li\s*>/gi, '\n')
@@ -58,7 +68,120 @@ function normalizeReleaseNotes(value) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-    .slice(0, 4000) || null
+}
+
+function parseReleaseVersion(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (trimmed.length > 128) return null
+  const normalized = trimmed.replace(/^v/i, '')
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(normalized)
+  if (!match) return null
+  return {
+    key: normalized,
+    display: `v${normalized}`,
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    prerelease: match[4] ? match[4].split('.') : null,
+  }
+}
+
+function compareReleaseVersions(left, right) {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] < right.core[index]) return -1
+    if (left.core[index] > right.core[index]) return 1
+  }
+  if (left.prerelease === null && right.prerelease !== null) return 1
+  if (left.prerelease !== null && right.prerelease === null) return -1
+  if (left.prerelease !== null && right.prerelease !== null) {
+    const length = Math.max(left.prerelease.length, right.prerelease.length)
+    for (let index = 0; index < length; index += 1) {
+      const leftPart = left.prerelease[index]
+      const rightPart = right.prerelease[index]
+      if (leftPart === undefined) return -1
+      if (rightPart === undefined) return 1
+      if (leftPart === rightPart) continue
+      const leftNumeric = /^\d+$/.test(leftPart)
+      const rightNumeric = /^\d+$/.test(rightPart)
+      if (leftNumeric && rightNumeric) {
+        const leftNumber = BigInt(leftPart)
+        const rightNumber = BigInt(rightPart)
+        if (leftNumber < rightNumber) return -1
+        if (leftNumber > rightNumber) return 1
+      } else if (leftNumeric !== rightNumeric) {
+        return leftNumeric ? -1 : 1
+      } else {
+        const comparison = leftPart.localeCompare(rightPart, 'en')
+        if (comparison !== 0) return comparison
+      }
+    }
+  }
+  return left.key.localeCompare(right.key, 'en')
+}
+
+function releaseVersionKey(value) {
+  return parseReleaseVersion(value)?.key ?? null
+}
+
+function joinReleaseNoteSectionsPrioritizingLatest(versionedSections, unversionedSections) {
+  const selectedNewestFirst = []
+  let usedLength = 0
+
+  for (let index = versionedSections.length - 1; index >= 0; index -= 1) {
+    const separatorLength = selectedNewestFirst.length > 0 ? 2 : 0
+    const remaining = MAX_RELEASE_NOTES_LENGTH - usedLength - separatorLength
+    if (remaining <= 0) break
+    const section = truncateTextSafely(versionedSections[index], remaining)
+    if (!section) continue
+    selectedNewestFirst.push(section)
+    usedLength += separatorLength + section.length
+  }
+
+  const selected = selectedNewestFirst.reverse()
+  for (const section of unversionedSections) {
+    const separatorLength = selected.length > 0 ? 2 : 0
+    const remaining = MAX_RELEASE_NOTES_LENGTH - usedLength - separatorLength
+    if (remaining <= 0) break
+    const truncated = truncateTextSafely(section, remaining)
+    if (!truncated) continue
+    selected.push(truncated)
+    usedLength += separatorLength + truncated.length
+  }
+  return selected.join('\n\n') || null
+}
+
+function normalizeReleaseNotes(value) {
+  if (typeof value === 'string') {
+    const text = sanitizeReleaseNoteText(value)
+    return truncateTextSafely(text, MAX_RELEASE_NOTES_LENGTH) || null
+  }
+  if (!Array.isArray(value)) return null
+
+  const versioned = new Map()
+  const unversioned = []
+  for (const entry of value.slice(0, MAX_RELEASE_NOTE_ENTRIES)) {
+    const noteValue = typeof entry === 'string' ? entry : entry?.note
+    const note = sanitizeReleaseNoteText(noteValue)
+    const version = parseReleaseVersion(entry?.version)
+    if (!version) {
+      if (note && !unversioned.includes(note)) unversioned.push(note)
+      continue
+    }
+
+    const existing = versioned.get(version.key)
+    if (existing) {
+      if (note && !existing.notes.includes(note)) existing.notes.push(note)
+    } else {
+      versioned.set(version.key, { version, notes: note ? [note] : [] })
+    }
+  }
+
+  const sections = [...versioned.values()]
+    .sort((left, right) => compareReleaseVersions(left.version, right.version))
+    .map(({ version, notes }) => {
+      const body = truncateTextSafely(notes.join('\n\n'), MAX_RELEASE_NOTE_SOURCE_LENGTH)
+      return body ? `## ${version.display}\n\n${body}` : `## ${version.display}`
+    })
+  return joinReleaseNoteSectionsPrioritizingLatest(sections, unversioned)
 }
 
 function normalizeUpdateInfo(info) {
@@ -118,6 +241,8 @@ function createUpdaterController({
   let startupCheckStarted = false
   let quitAndInstallTriggered = false
   let installRecoveryPromise = null
+  let downloadAttemptSequence = 0
+  let explicitDownloadConsent = null
 
   function publish(patch) {
     const nextStatus = patch.status || state.status
@@ -171,7 +296,22 @@ function createUpdaterController({
   })
   adapter.on('update-downloaded', (info) => {
     if (!support.supported) return
+    if (state.status === 'installing') return
+    const downloadedVersion = releaseVersionKey(info?.version)
+    const availableVersion = releaseVersionKey(state.availableVersion)
+    if (availableVersion && (
+      !downloadedVersion
+      || downloadedVersion !== availableVersion
+    )) return
+    if (explicitDownloadConsent && (
+      !downloadedVersion
+      || downloadedVersion !== explicitDownloadConsent.version
+    )) return
     updateInfoState('downloaded', info, { progress: 100 })
+    if (explicitDownloadConsent) {
+      explicitDownloadConsent = null
+      void install()
+    }
   })
   async function recoverFailedInstall(error) {
     if (installRecoveryPromise) return installRecoveryPromise
@@ -200,6 +340,7 @@ function createUpdaterController({
     const operation = state.status === 'downloading'
       ? 'download'
       : state.status === 'checking' ? 'check' : 'unknown'
+    if (operation === 'download') explicitDownloadConsent = null
     publish({
       status: operation === 'download' && state.availableVersion ? 'available' : 'error',
       progress: null,
@@ -237,15 +378,22 @@ function createUpdaterController({
     if (!support.supported || state.status !== 'available') return getState()
     if (downloadPromise) return downloadPromise
 
+    const consentedVersion = releaseVersionKey(state.availableVersion)
+    const attempt = ++downloadAttemptSequence
+    explicitDownloadConsent = consentedVersion ? { attempt, version: consentedVersion } : null
     publish({ status: 'downloading', progress: 0, error: null })
     downloadPromise = Promise.resolve()
       .then(() => adapter.downloadUpdate())
-      .then(() => getState())
-      .catch((error) => publish({
-        status: 'available',
-        progress: null,
-        error: sanitizeUpdaterError(error, 'download'),
-      }))
+      .then(() => installPromise || getState())
+      .catch((error) => {
+        if (explicitDownloadConsent?.attempt === attempt) explicitDownloadConsent = null
+        if (['downloaded', 'installing'].includes(state.status)) return getState()
+        return publish({
+          status: 'available',
+          progress: null,
+          error: sanitizeUpdaterError(error, 'download'),
+        })
+      })
       .finally(() => {
         downloadPromise = null
       })
@@ -264,7 +412,7 @@ function createUpdaterController({
         if (installRecoveryPromise || state.status !== 'installing') {
           return installRecoveryPromise || getState()
         }
-        adapter.quitAndInstall(false, true)
+        adapter.quitAndInstall(true, true)
         return installRecoveryPromise || getState()
       })
       .catch(recoverFailedInstall)
@@ -279,6 +427,7 @@ function configureAutoUpdater(adapter) {
   adapter.autoInstallOnAppQuit = false
   adapter.allowPrerelease = false
   adapter.allowDowngrade = false
+  adapter.fullChangelog = true
   adapter.disableWebInstaller = true
   return adapter
 }

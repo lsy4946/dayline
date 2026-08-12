@@ -1,6 +1,6 @@
 {
   "name": "dayline",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Calendar-first offline todo widget for Windows",
   "author": "Dayline",
@@ -73,6 +73,7 @@
       ]
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "oneClick": false,

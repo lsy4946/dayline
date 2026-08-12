@@ -46,6 +46,15 @@ export function parseReleaseNotes(notes: string): ReleaseNoteBlock[] {
       continue
     }
 
+    const scopedHeading = line.match(/^\[([^\]]+)]$/)
+    if (scopedHeading) {
+      flushParagraph()
+      flushList()
+      const text = readableInline(scopedHeading[1])
+      if (text) blocks.push({ kind: 'heading', level: 3, text })
+      continue
+    }
+
     const unordered = line.match(/^[-*+]\s+(.+)$/)
     const ordered = line.match(/^\d+[.)]\s+(.+)$/)
     const listItem = unordered ?? ordered
