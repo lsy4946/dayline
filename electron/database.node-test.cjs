@@ -51,6 +51,7 @@ function makeDailyNote(overrides = {}) {
     noteDate: '2026-09-09',
     completed: false,
     completedAt: null,
+    pinned: false,
     createdAt: '2026-09-09T01:00:00.000Z',
     updatedAt: '2026-09-09T01:00:00.000Z',
     ...overrides,
@@ -501,7 +502,7 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   let store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 4)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 5)
   assert.deepEqual(store.tasks.map((task) => task.id), ['v1-task'])
   assert.deepEqual(store.tasks[0].subTasks, [])
   assert.equal(store.tasks[0].startDate, store.tasks[0].dueDate)
@@ -520,10 +521,11 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 2`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 3`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5`).get().count, 1)
   inspected.close()
 })
 
-test('upgrades a v2 database to v4 without demos and assigns deterministic ranges, tags, and positions', (t) => {
+test('upgrades a v2 database to v5 without demos and assigns deterministic ranges, tags, and positions', (t) => {
   const paths = tempPaths(t)
   const sqlite = new DatabaseSync(paths.databasePath)
   sqlite.exec(`
@@ -587,7 +589,7 @@ test('upgrades a v2 database to v4 without demos and assigns deterministic range
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   const store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 4)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 5)
   assert.deepEqual(store.tasks.map(({ id, position }) => ({ id, position })), [
     { id: 'v2-first', position: 0 },
     { id: 'v2-later', position: 1 },
@@ -608,6 +610,7 @@ test('upgrades a v2 database to v4 without demos and assigns deterministic range
     widgetSplit: 50,
     fontScale: 1,
     themeColor: '#255F4B',
+    calendarWeekScroll: false,
   })
   assert.deepEqual(store.taskTemplates, [])
   const firstRevision = store.revision
@@ -619,6 +622,41 @@ test('upgrades a v2 database to v4 without demos and assigns deterministic range
   assert.deepEqual(reopenedStore.taskTemplates, [])
   assert.equal(reopenedStore.revision, firstRevision)
   reopened.close()
+})
+
+test('upgrades a v4 database with safe defaults for week scrolling and pinned notes', (t) => {
+  const paths = tempPaths(t)
+  let database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const before = database.readStore()
+  const note = before.dailyNotes[0]
+  database.applyStoreMutations([
+    { type: 'settings:patch', changes: { calendarWeekScroll: true } },
+    { type: 'daily-note:patch', id: note.id, changes: { pinned: true } },
+  ])
+  database.close()
+
+  const v4 = new DatabaseSync(paths.databasePath)
+  v4.exec(`
+    ALTER TABLE app_settings DROP COLUMN calendar_week_scroll;
+    ALTER TABLE daily_notes DROP COLUMN pinned;
+    DELETE FROM schema_migrations WHERE version = 5;
+    PRAGMA user_version = 4;
+  `)
+  v4.close()
+
+  database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const upgraded = database.readStore()
+  assert.equal(database.readDiagnostics().schemaVersion, 5)
+  assert.equal(upgraded.settings.calendarWeekScroll, false)
+  assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).pinned, false)
+  assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).content, note.content)
+  database.close()
+
+  const inspected = new DatabaseSync(paths.databasePath, { readOnly: true })
+  assert.ok(inspected.prepare(`PRAGMA table_info(app_settings)`).all().some((column) => column.name === 'calendar_week_scroll'))
+  assert.ok(inspected.prepare(`PRAGMA table_info(daily_notes)`).all().some((column) => column.name === 'pinned'))
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5`).get().count, 1)
+  inspected.close()
 })
 
 test('merges stale child-row mutations and derives parent completion after the whole batch', (t) => {
@@ -778,15 +816,20 @@ test('supports daily-note create, field-level patch merge, delete, and persisten
   store = database.applyStoreMutations([{
     type: 'daily-note:patch',
     id: 'note-1',
-    changes: { completed: true, completedAt: '2026-09-09T04:05:00.000Z' },
+    changes: { completed: true, completedAt: '2026-09-09T04:05:00.000Z', pinned: true },
   }])
   assert.equal(store.dailyNotes[0].content, '다른 창에서 바꾼 내용')
   assert.equal(store.dailyNotes[0].completed, true)
+  assert.equal(store.dailyNotes[0].pinned, true)
 
-  store = database.applyStoreMutations([{ type: 'daily-note:delete', id: 'note-1' }])
+  database.close()
+  const persisted = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  assert.equal(persisted.readStore().dailyNotes[0].pinned, true)
+
+  store = persisted.applyStoreMutations([{ type: 'daily-note:delete', id: 'note-1' }])
   assert.deepEqual(store.dailyNotes, [])
   const finalRevision = store.revision
-  database.close()
+  persisted.close()
   const reopened = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   assert.equal(reopened.readStore().revision, finalRevision)
   assert.deepEqual(reopened.readStore().dailyNotes, [])
@@ -844,7 +887,7 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
     { type: 'daily-note:patch', id: 'note-b', changes: { position: 0 } },
     {
       type: 'settings:patch',
-      changes: { sidebarSplit: 5, widgetSplit: 95, fontScale: 9, themeColor: '#abcdef' },
+      changes: { sidebarSplit: 5, widgetSplit: 95, fontScale: 9, themeColor: '#abcdef', calendarWeekScroll: true },
     },
   ])
 
@@ -864,6 +907,7 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
     widgetSplit: 80,
     fontScale: 1.5,
     themeColor: '#ABCDEF',
+    calendarWeekScroll: true,
   })
   assert.deepEqual(store.taskTemplates, [template])
 
@@ -895,6 +939,7 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
   assert.equal(store.taskTags.find((tag) => tag.id === 'builtin-coral').name, '중요')
   assert.equal(store.taskTags.find((tag) => tag.id === 'custom-focus').color, '#654321')
   assert.equal(store.taskTemplates[0].durationDays, 1)
+  assert.equal(store.settings.calendarWeekScroll, true)
 
   store = reopened.applyStoreMutations([{ type: 'tag:delete', id: 'custom-focus' }])
   assert.equal(store.taskTags.some((tag) => tag.id === 'custom-focus'), false)
@@ -935,7 +980,7 @@ test('queues nested task and daily-note payloads for a future linked profile', (
   database.applyStoreMutations([{
     type: 'daily-note:patch',
     id: 'note-1',
-    changes: { content: '동기화할 당일 메모' },
+    changes: { content: '동기화할 당일 메모', pinned: true },
   }])
   database.applyStoreMutations([
     {
@@ -1003,7 +1048,9 @@ test('queues nested task and daily-note payloads for a future linked profile', (
   assert.equal(taskPayload.tagId, 'builtin-coral')
   assert.equal(taskPayload.position, 0)
   assert.equal(noteOutbox.operation, 'upsert')
-  assert.equal(JSON.parse(noteOutbox.payload_json).content, '동기화할 당일 메모')
+  const notePayload = JSON.parse(noteOutbox.payload_json)
+  assert.equal(notePayload.content, '동기화할 당일 메모')
+  assert.equal(notePayload.pinned, true)
   assert.equal(JSON.parse(tagOutbox.payload_json).name, '동기화 태그')
   assert.deepEqual(JSON.parse(templateOutbox.payload_json).subTaskTitles, ['하위 일정'])
   assert.equal(JSON.parse(settingsOutbox.payload_json).sidebarSplit, 42)
@@ -1061,7 +1108,7 @@ test('records cached update consent and reconciles an exact installed target off
   assert.equal(inspected.prepare(`
     SELECT COUNT(*) AS count FROM app_meta WHERE key = 'installed_release_history_v1'
   `).get().count, 1)
-  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 5)
   inspected.close()
 })
 

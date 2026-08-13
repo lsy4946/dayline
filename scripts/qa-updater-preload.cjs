@@ -98,6 +98,7 @@ const store = {
     widgetSplit: 50,
     fontScale: 1,
     themeColor: '#255F4B',
+    calendarWeekScroll: false,
   },
   taskTemplates: [],
   migrationWarning: null,

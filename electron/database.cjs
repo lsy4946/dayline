@@ -4,7 +4,7 @@ const { DatabaseSync } = require('node:sqlite')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 const STORE_VERSION = 1
 const UPDATE_CONSENT_META_KEY = 'pending_update_consent_v1'
 const INSTALLED_RELEASE_HISTORY_META_KEY = 'installed_release_history_v1'
@@ -17,6 +17,7 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   widgetSplit: 50,
   fontScale: 1,
   themeColor: '#255F4B',
+  calendarWeekScroll: false,
 })
 const BUILT_IN_TAG_DEFINITIONS = Object.freeze([
   { id: 'builtin-coral', name: '코랄', color: '#EF6F61', legacyColor: 'coral' },
@@ -73,12 +74,13 @@ const SUBTASK_COLUMN_BY_FIELD = {
   completedAt: 'completed_at',
   updatedAt: 'updated_at',
 }
-const DAILY_NOTE_PATCHABLE_FIELDS = ['content', 'noteDate', 'completed', 'completedAt', 'position', 'updatedAt']
+const DAILY_NOTE_PATCHABLE_FIELDS = ['content', 'noteDate', 'completed', 'completedAt', 'pinned', 'position', 'updatedAt']
 const DAILY_NOTE_COLUMN_BY_FIELD = {
   content: 'content',
   noteDate: 'note_date',
   completed: 'completed',
   completedAt: 'completed_at',
+  pinned: 'pinned',
   position: 'position',
   updatedAt: 'updated_at',
 }
@@ -457,6 +459,7 @@ function sanitizeSettings(settings) {
     widgetSplit: clampNumber(value.widgetSplit, 20, 80, DEFAULT_APP_SETTINGS.widgetSplit),
     fontScale: clampNumber(value.fontScale, 0.85, 1.5, DEFAULT_APP_SETTINGS.fontScale),
     themeColor: normalizeHex(value.themeColor, DEFAULT_APP_SETTINGS.themeColor),
+    calendarWeekScroll: value.calendarWeekScroll === true,
   }
 }
 
@@ -606,6 +609,7 @@ function sanitizeDailyNote(note, now = new Date(), fallbackPosition = 0) {
     completedAt: completed && isIsoTimestamp(note.completedAt)
       ? new Date(note.completedAt).toISOString()
       : null,
+    pinned: note.pinned === true,
     position: validPosition(note.position, fallbackPosition),
     createdAt: normalizeTimestamp(note.createdAt, nowIso),
     updatedAt: normalizeTimestamp(note.updatedAt, nowIso),
@@ -656,6 +660,7 @@ function rowToDailyNote(row) {
     noteDate: row.note_date,
     completed: row.completed === 1,
     completedAt: row.completed_at,
+    pinned: row.pinned === 1,
     position: row.position,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -682,6 +687,7 @@ function rowToSettings(row) {
         widgetSplit: row.widget_split,
         fontScale: row.font_scale,
         themeColor: row.theme_color,
+        calendarWeekScroll: row.calendar_week_scroll === 1,
       }
     : { ...DEFAULT_APP_SETTINGS }
 }
@@ -710,7 +716,7 @@ function rowToTaskTemplate(row) {
 }
 
 function sqliteValue(field, value) {
-  if (field === 'completed') return value ? 1 : 0
+  if (field === 'completed' || field === 'pinned') return value ? 1 : 0
   if (field === 'previousCompleted') return value == null ? null : value ? 1 : 0
   if (field === 'subTaskTitles') return JSON.stringify(value)
   return value
@@ -1093,6 +1099,28 @@ function createSchema(database, appliedAt) {
       database.exec('PRAGMA user_version = 4')
     })
   }
+
+  if (currentVersion < 5) {
+    inTransaction(database, () => {
+      if (!tableHasColumn(database, 'app_settings', 'calendar_week_scroll')) {
+        database.exec(`
+          ALTER TABLE app_settings ADD COLUMN calendar_week_scroll INTEGER NOT NULL DEFAULT 0
+          CHECK (calendar_week_scroll IN (0, 1))
+        `)
+      }
+      if (!tableHasColumn(database, 'daily_notes', 'pinned')) {
+        database.exec(`
+          ALTER TABLE daily_notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0
+          CHECK (pinned IN (0, 1))
+        `)
+      }
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 5')
+    })
+  }
 }
 
 function insertSubTask(database, taskId, subTask, position) {
@@ -1152,8 +1180,8 @@ function insertTask(database, profileId, task) {
 function insertDailyNote(database, profileId, note) {
   return Number(database.prepare(`
     INSERT INTO daily_notes (
-      id, profile_id, content, note_date, completed, completed_at, position, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, profile_id, content, note_date, completed, completed_at, pinned, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     note.id,
@@ -1162,6 +1190,7 @@ function insertDailyNote(database, profileId, note) {
     note.noteDate,
     note.completed ? 1 : 0,
     note.completedAt,
+    note.pinned ? 1 : 0,
     note.position,
     note.createdAt,
     note.updatedAt,
@@ -1221,13 +1250,14 @@ function insertTaskTemplate(database, profileId, template) {
 function upsertSettings(database, profileId, settings, updatedAt) {
   database.prepare(`
     INSERT INTO app_settings (
-      profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
+      profile_id, sidebar_split, widget_split, font_scale, theme_color, calendar_week_scroll, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(profile_id) DO UPDATE SET
       sidebar_split = excluded.sidebar_split,
       widget_split = excluded.widget_split,
       font_scale = excluded.font_scale,
       theme_color = excluded.theme_color,
+      calendar_week_scroll = excluded.calendar_week_scroll,
       updated_at = excluded.updated_at
   `).run(
     profileId,
@@ -1235,6 +1265,7 @@ function upsertSettings(database, profileId, settings, updatedAt) {
     settings.widgetSplit,
     settings.fontScale,
     settings.themeColor,
+    settings.calendarWeekScroll ? 1 : 0,
     updatedAt,
   )
 }
@@ -1251,8 +1282,8 @@ function ensureProfileV3Defaults(database, profileId, timestamp, assignLegacyTas
   }
   database.prepare(`
     INSERT INTO app_settings (
-      profile_id, sidebar_split, widget_split, font_scale, theme_color, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
+      profile_id, sidebar_split, widget_split, font_scale, theme_color, calendar_week_scroll, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(profile_id) DO NOTHING
   `).run(
     profileId,
@@ -1260,6 +1291,7 @@ function ensureProfileV3Defaults(database, profileId, timestamp, assignLegacyTas
     DEFAULT_APP_SETTINGS.widgetSplit,
     DEFAULT_APP_SETTINGS.fontScale,
     DEFAULT_APP_SETTINGS.themeColor,
+    DEFAULT_APP_SETTINGS.calendarWeekScroll ? 1 : 0,
     timestamp,
   )
   if (assignLegacyTaskTags) {

@@ -26,6 +26,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   widgetSplit: 50,
   fontScale: 1,
   themeColor: '#255F4B',
+  calendarWeekScroll: false,
 }
 
 const BUILT_IN_TAG_DEFINITIONS: Array<Pick<TaskTag, 'id' | 'name' | 'color' | 'legacyColor'>> = [
@@ -53,7 +54,7 @@ const MUTABLE_TASK_FIELDS = [
   'completed', 'completedAt', 'deletedAt', 'previousCompleted', 'updatedAt',
 ] as const
 const MUTABLE_DAILY_NOTE_FIELDS = [
-  'content', 'noteDate', 'completed', 'completedAt', 'position', 'updatedAt',
+  'content', 'noteDate', 'completed', 'completedAt', 'pinned', 'position', 'updatedAt',
 ] as const
 const MUTABLE_TAG_FIELDS = ['name', 'color', 'position', 'updatedAt'] as const
 const MUTABLE_TEMPLATE_FIELDS = [
@@ -108,6 +109,7 @@ function normalizeSettings(raw: unknown): AppSettings {
     widgetSplit: clampNumber(value.widgetSplit, 20, 80, DEFAULT_APP_SETTINGS.widgetSplit),
     fontScale: clampNumber(value.fontScale, 0.85, 1.5, DEFAULT_APP_SETTINGS.fontScale),
     themeColor: normalizeHex(value.themeColor, DEFAULT_APP_SETTINGS.themeColor),
+    calendarWeekScroll: value.calendarWeekScroll === true,
   }
 }
 
@@ -221,6 +223,7 @@ function normalizeDailyNote(raw: unknown, fallbackTimestamp: string, fallbackPos
     noteDate: String(raw.noteDate),
     completed,
     completedAt: completed ? nullableTimestamp(raw.completedAt) : null,
+    pinned: raw.pinned === true,
     position: validPosition(raw.position, fallbackPosition),
     createdAt,
     updatedAt: timestamp(raw.updatedAt, createdAt),
@@ -370,7 +373,7 @@ function storeMutations(previousStore: DaylineStore, nextStore: DaylineStore): S
   for (const tag of previousStore.taskTags) if (!nextTagIds.has(tag.id)) mutations.push({ type: 'tag:delete', id: tag.id })
 
   const settingsChanges: AppSettingsPatch = {}
-  for (const field of ['sidebarSplit', 'widgetSplit', 'fontScale', 'themeColor'] as const) {
+  for (const field of ['sidebarSplit', 'widgetSplit', 'fontScale', 'themeColor', 'calendarWeekScroll'] as const) {
     if (!Object.is(previousStore.settings[field], nextStore.settings[field])) Object.assign(settingsChanges, { [field]: nextStore.settings[field] })
   }
   if (Object.keys(settingsChanges).length > 0) mutations.push({ type: 'settings:patch', changes: settingsChanges })
@@ -578,7 +581,7 @@ function browserSeed(): DaylineStore {
     ],
     dailyNotes: [{
       id: makeId(), content: '떠오른 할 일을 여기에 바로 적어 보세요.', noteDate: todayKey(), completed: false,
-      completedAt: null, position: 0, createdAt: nowIso, updatedAt: nowIso,
+      completedAt: null, pinned: false, position: 0, createdAt: nowIso, updatedAt: nowIso,
     }],
     taskTags,
     settings: { ...DEFAULT_APP_SETTINGS },

@@ -1000,6 +1000,7 @@ function createQaStore(today) {
         noteDate: today,
         completed: false,
         completedAt: null,
+        pinned: false,
         position: 0,
         createdAt: '2026-08-11T01:20:00.000Z',
         updatedAt: '2026-08-11T01:20:00.000Z',
@@ -1010,6 +1011,7 @@ function createQaStore(today) {
         noteDate: today,
         completed: false,
         completedAt: null,
+        pinned: false,
         position: 1,
         createdAt: '2026-08-11T01:21:00.000Z',
         updatedAt: '2026-08-11T01:21:00.000Z',
@@ -1020,6 +1022,7 @@ function createQaStore(today) {
         noteDate: today,
         completed: false,
         completedAt: null,
+        pinned: false,
         position: 2,
         createdAt: '2026-08-11T01:22:00.000Z',
         updatedAt: '2026-08-11T01:22:00.000Z',
@@ -1031,6 +1034,7 @@ function createQaStore(today) {
       widgetSplit: 50,
       fontScale: 1,
       themeColor: '#255F4B',
+      calendarWeekScroll: false,
     },
     taskTemplates: [
       {
@@ -1412,7 +1416,7 @@ app.whenReady().then(async () => {
       && parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-20')) === 20`,
     'reset interface scale',
   )
-  await runIn(mainWindow, `document.querySelector('[aria-label="화면 설정 닫기"]')?.click()`)
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
   await waitForRenderer(mainWindow, `!document.querySelector('[data-qa="appearance-panel"]')`, 'closed appearance panel')
   mainWindow.setSize(1480, 920)
   await waitForRenderer(
@@ -2814,6 +2818,289 @@ app.whenReady().then(async () => {
     'A quick note increments only its own section count, never a calendar or schedule count',
   )
 
+  qaStage = 'quick-note-pin'
+  const quickNoteActionOrder = await runIn(mainWindow, `(() => {
+    const row = document.querySelector('[data-daily-note-id="${quickNoteId}"]')
+    const deleteButton = row?.querySelector('.note-delete')
+    const pinButton = row?.querySelector('[data-qa="quick-note-pin"]')
+    if (!row || !deleteButton || !pinButton) return null
+    return {
+      domOrder: Boolean(deleteButton.compareDocumentPosition(pinButton) & Node.DOCUMENT_POSITION_FOLLOWING),
+      deleteLeft: deleteButton.getBoundingClientRect().left < pinButton.getBoundingClientRect().left,
+    }
+  })()`)
+  assert.deepEqual(
+    quickNoteActionOrder,
+    { domOrder: true, deleteLeft: true },
+    'Quick-note delete action must appear immediately before the pin action',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
+        .filter((note) => note.id === ${JSON.stringify(quickNoteId)} && note.pinned).length === 1
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'quick-note pin persists once and leads its source-date list',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector(
+      '[data-qa="quick-note-section"] [data-daily-note-id]',
+    )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]')
+        ?.getAttribute('aria-pressed') === 'true'`,
+    'source-date pin order persists after renderer restart',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId !== ${JSON.stringify(quickNoteId)}`,
+    'unpinning on the source date restores the note to its saved native position',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector(
+      '[data-qa="quick-note-section"] [data-daily-note-id]',
+    )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'repinning on the source date immediately restores the fixed top position',
+  )
+  const foreignPinnedDate = addDaysKey(today, 1)
+  const nextForeignPinnedDate = addDaysKey(today, 2)
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelectorAll('[data-daily-note-id="${quickNoteId}"]').length === 1
+      && !document.querySelector('[data-daily-note-id="${quickNoteId}"] .reorder-handle')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]')
+        ?.getAttribute('aria-pressed') === 'true'`,
+    'foreign date renders one pinned note without a reorder handle',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'`,
+    'foreign unpin lingers on the current selected date',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  assert.equal(
+    await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
+    true,
+    'reselecting the same date does not dismiss a lingering note',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${nextForeignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')`,
+    'lingering note disappears on the next different date',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${today}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`,
+    'native note remains visible on its source date',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  await runIn(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-check')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'completed foreign pin remains globally visible and fixed at the top',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${nextForeignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
+      && !document.querySelector('[data-daily-note-id="${quickNoteId}"] .reorder-handle')`,
+    'completed pin remains globally visible and fixed after selecting a different date',
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
+        .filter((note) => note.id === ${JSON.stringify(quickNoteId)}
+          && note.pinned && note.completed).length === 1`,
+    'completed pin persists once and remains globally fixed after renderer restart',
+  )
+  const reloadedCompletedPinDate = addDaysKey(today, 3)
+  await runIn(
+    mainWindow,
+    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'reloaded completed pin remains visible and fixed on another selected date',
+  )
+  const completedPinnedStoreBeforeDelete = await runIn(
+    mainWindow,
+    `localStorage.getItem('dayline-browser-store-v1')`,
+  )
+  assert.ok(completedPinnedStoreBeforeDelete, 'Completed-pin deletion QA requires a restorable store')
+  await runIn(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-delete')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')
+      && !JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
+        .some((note) => note.id === ${JSON.stringify(quickNoteId)})`,
+    'deleting a completed pin removes its single stored row and global rendering',
+  )
+  await reloadRenderer(mainWindow)
+  assert.equal(
+    await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
+    false,
+    'deleted completed pin remains absent after renderer restart',
+  )
+  await runIn(
+    mainWindow,
+    `localStorage.setItem(
+      'dayline-browser-store-v1',
+      ${JSON.stringify(completedPinnedStoreBeforeDelete)},
+    )`,
+  )
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'restored completed pin after isolated deletion acceptance',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'restored completed pin remains globally fixed before unpin acceptance',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')`,
+    'unpinning a completed foreign pin lingers on the current date',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
+  )
+  assert.equal(
+    await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
+    true,
+    'reselecting the same date does not dismiss a completed unpinned linger',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')`,
+    'completed unpinned linger disappears on the next different date',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${today}"]')?.click()`)
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-check')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')`,
+    'native note reactivation restores its active pin',
+  )
+  await reloadRenderer(widgetWindow)
+  const widgetForeignPinnedDate = await runIn(widgetWindow, `(() => {
+    const button = [...document.querySelectorAll('.widget-week [data-date]')]
+      .find((candidate) => candidate.dataset.date !== ${JSON.stringify(today)})
+    button?.click()
+    return button?.dataset.date ?? ''
+  })()`)
+  assert.ok(widgetForeignPinnedDate, 'Widget requires a foreign week date for pinned-note QA')
+  await waitForRenderer(
+    widgetWindow,
+    `document.querySelectorAll(
+      '[data-qa="widget-quick-notes"] [data-daily-note-id="${quickNoteId}"]',
+    ).length === 1
+      && document.querySelector(
+        '[data-qa="widget-quick-notes"] [data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+      )?.getAttribute('aria-pressed') === 'true'`,
+    'widget shares global pinned-note visibility and pin control',
+  )
+  await runIn(widgetWindow, `document.querySelector('.widget-week [data-date="${today}"]')?.click()`)
+
   qaStage = 'sidebar-schedule-add'
   const scheduleCountBeforeAdd = countsAfterQuickNote.scheduleBadge
   const storeBeforeSidebarScheduleAdd = await runIn(
@@ -2860,8 +3147,12 @@ app.whenReady().then(async () => {
   )
   await waitForRenderer(
     mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')`,
-    'daily-note completion state',
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
+    'completed source-date pin remains visible in the fixed top group',
   )
 
   qaStage = 'reorder-and-persist'
@@ -4383,8 +4674,723 @@ app.whenReady().then(async () => {
       && document.querySelector('[data-rail-action="appearance"]')?.getAttribute('aria-expanded') === 'true'
       && document.querySelector('[data-qa="appearance-panel"]')?.getAttribute('aria-labelledby')
         === 'rail-action-appearance'
-      && document.activeElement === document.querySelector('[aria-label="화면 설정 닫기"]')`,
+      && document.activeElement === document.querySelector('[aria-label="일반 설정 닫기"]')`,
     'focused standalone appearance panel',
+  )
+  const generalSettingsState = await runIn(mainWindow, `(() => {
+    const action = document.querySelector('[data-rail-action="appearance"]')
+    const panel = document.querySelector('[data-qa="appearance-panel"]')
+    const toggle = panel?.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+    return {
+      actionLabel: action?.getAttribute('aria-label'),
+      iconClasses: action?.querySelector('svg')?.getAttribute('class') ?? '',
+      panelTitle: panel?.querySelector('h2')?.textContent.trim(),
+      panelText: panel?.textContent ?? '',
+      switchRole: toggle?.getAttribute('role'),
+      switchChecked: toggle?.getAttribute('aria-checked'),
+      switchState: panel?.querySelector('[data-qa="calendar-week-scroll-state"]')?.textContent.trim(),
+      stored: JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.settings?.calendarWeekScroll,
+    }
+  })()`)
+  assert.deepEqual(
+    {
+      actionLabel: generalSettingsState.actionLabel,
+      panelTitle: generalSettingsState.panelTitle,
+      switchRole: generalSettingsState.switchRole,
+      switchChecked: generalSettingsState.switchChecked,
+      switchState: generalSettingsState.switchState,
+      stored: generalSettingsState.stored,
+    },
+    {
+      actionLabel: '일반 설정',
+      panelTitle: '일반 설정',
+      switchRole: 'switch',
+      switchChecked: 'false',
+      switchState: 'OFF',
+      stored: false,
+    },
+    'General settings must replace the old appearance label and default week scrolling to OFF',
+  )
+  assert.equal(generalSettingsState.panelText.includes('화면 설정'), false)
+  assert.ok(
+    generalSettingsState.iconClasses.includes('lucide-settings'),
+    `General settings must use a settings icon: ${generalSettingsState.iconClasses}`,
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'true'
+      && document.querySelector('[data-qa="calendar-week-scroll-state"]')?.textContent.trim() === 'ON'
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.settings?.calendarWeekScroll === true`,
+    'enabled persisted calendar week scrolling',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="appearance-panel"]')
+      && document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'true'`,
+    'closed general settings with week scrolling enabled',
+  )
+
+  qaStage = 'calendar-week-scroll'
+  const wheelStart = await runIn(mainWindow, `document.querySelector('.calendar-grid')?.dataset.viewStart ?? ''`)
+  assert.ok(wheelStart, 'Calendar grid must expose its rolling viewport start')
+  const dispatchCalendarWheel = (options) => runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    if (!grid) return null
+    const event = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      ${Object.entries(options).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join(',\n      ')}
+    })
+    grid.dispatchEvent(event)
+    return { defaultPrevented: event.defaultPrevented, start: grid.dataset.viewStart }
+  })()`)
+  const horizontalWheel = await dispatchCalendarWheel({ deltaX: 120, deltaY: 12 })
+  assert.deepEqual(horizontalWheel, { defaultPrevented: false, start: wheelStart })
+  const ctrlWheel = await dispatchCalendarWheel({ deltaY: 120, ctrlKey: true })
+  assert.deepEqual(ctrlWheel, { defaultPrevented: false, start: wheelStart })
+  const nestedWheel = await runIn(mainWindow, `(() => {
+    const cell = document.querySelector('.calendar-cell[data-date]')
+    const grid = document.querySelector('.calendar-grid')
+    if (!cell || !grid) return null
+    const nested = document.createElement('div')
+    nested.style.cssText = 'position:absolute;inset:2px;overflow-y:auto;z-index:9999;background:white'
+    const content = document.createElement('div')
+    content.style.height = '400px'
+    content.textContent = 'nested scroll guard'
+    nested.appendChild(content)
+    cell.appendChild(nested)
+    const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 })
+    nested.dispatchEvent(event)
+    const result = {
+      defaultPrevented: event.defaultPrevented,
+      start: grid.dataset.viewStart,
+      scrollable: nested.scrollHeight > nested.clientHeight + 1,
+    }
+    nested.remove()
+    return result
+  })()`)
+  assert.deepEqual(nestedWheel, { defaultPrevented: false, start: wheelStart, scrollable: true })
+
+  // The shared capture stylesheet collapses motion to keep the broader suite fast.
+  // Restore the real calendar timings only while exercising the week transition.
+  const calendarMotionCssKey = await mainWindow.webContents.insertCSS(`
+    .calendar-grid.is-week-motion-exit {
+      animation-duration: 75ms !important;
+    }
+    .calendar-grid.is-week-motion-enter {
+      animation-duration: 115ms !important;
+    }
+  `)
+  const calendarMotionSnapshot = () => runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    const card = document.querySelector('.calendar-card')
+    if (!grid || !card) return null
+    const style = getComputedStyle(grid)
+    const transform = style.transform === 'none' ? new DOMMatrixReadOnly() : new DOMMatrixReadOnly(style.transform)
+    const gridBounds = grid.getBoundingClientRect()
+    const cardBounds = card.getBoundingClientRect()
+    return {
+      start: grid.dataset.viewStart,
+      phase: grid.dataset.weekMotionPhase ?? null,
+      direction: grid.dataset.weekMotionDirection ?? null,
+      sequence: Number(grid.dataset.weekMotionSequence || 0) || null,
+      busy: grid.getAttribute('aria-busy'),
+      animationName: style.animationName,
+      animationDuration: style.animationDuration,
+      pointerEvents: style.pointerEvents,
+      motionShield: getComputedStyle(grid, '::after').content,
+      translateY: transform.m42,
+      opacity: Number(style.opacity),
+      cardOverflow: getComputedStyle(card).overflow,
+      stableContained: gridBounds.left >= cardBounds.left - 1
+        && gridBounds.right <= cardBounds.right + 1
+        && gridBounds.top >= cardBounds.top - 1
+        && gridBounds.bottom <= cardBounds.bottom + 1,
+      noPageOverflow: document.documentElement.scrollWidth <= innerWidth + 1
+        && document.documentElement.scrollHeight <= innerHeight + 1,
+    }
+  })()`)
+  const wasMainWindowVisibleForWheelQa = mainWindow.isVisible()
+  if (!wasMainWindowVisibleForWheelQa) {
+    mainWindow.showInactive()
+    await sleep(40)
+  }
+  const nativeWheelPoint = await runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    if (!grid) return null
+    const bounds = grid.getBoundingClientRect()
+    const point = {
+      x: Math.round(bounds.left + bounds.width / 2),
+      y: Math.round(bounds.top + bounds.height / 2),
+    }
+    const hit = document.elementFromPoint(point.x, point.y)
+    return {
+      ...point,
+      hitInsideGrid: hit === grid || grid.contains(hit),
+      hitClass: hit?.className ?? null,
+    }
+  })()`)
+  assert.ok(nativeWheelPoint?.hitInsideGrid, `Calendar center must be natively hit-testable: ${JSON.stringify(nativeWheelPoint)}`)
+  const wheelDebugger = mainWindow.webContents.debugger
+  const wheelDebuggerAttachedHere = !wheelDebugger.isAttached()
+  if (wheelDebuggerAttachedHere) wheelDebugger.attach('1.3')
+  const dispatchNativeCalendarWheel = async (deltaY) => {
+    await runIn(mainWindow, `(() => {
+      window.__daylineNativeWheelTrace = null
+      document.addEventListener('wheel', (event) => {
+        const grid = document.querySelector('.calendar-grid')
+        window.__daylineNativeWheelTrace = {
+          deltaY: event.deltaY,
+          trusted: event.isTrusted,
+          targetInsideGrid: Boolean(grid && (event.target === grid || grid.contains(event.target))),
+          defaultPrevented: event.defaultPrevented,
+        }
+      }, { once: true })
+    })()`)
+    await wheelDebugger.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: nativeWheelPoint.x,
+      y: nativeWheelPoint.y,
+      deltaX: 0,
+      deltaY,
+    })
+    await waitForRenderer(
+      mainWindow,
+      `Boolean(window.__daylineNativeWheelTrace)`,
+      `native calendar wheel ${deltaY}`,
+    )
+    return runIn(mainWindow, `window.__daylineNativeWheelTrace`)
+  }
+
+  // A second wheel during exit fast-forwards the pending week, then immediately
+  // starts a fresh, visibly restarted transition for the second input.
+  const downwardWheel = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.equal(downwardWheel.defaultPrevented, true)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'exit'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'down'`,
+    'first downward week-scroll exit motion',
+  )
+  const firstDownwardExit = await calendarMotionSnapshot()
+  assert.ok(firstDownwardExit?.sequence, 'First downward exit must expose its motion sequence')
+  assert.equal(firstDownwardExit.start, wheelStart, 'The first pending week is not committed before interruption')
+  assert.equal(firstDownwardExit.busy, 'true')
+  assert.equal(firstDownwardExit.animationDuration, '0.075s')
+  assert.match(firstDownwardExit.animationName, /^calendar-week-exit-up(?:-alternate)?$/)
+  assert.notEqual(firstDownwardExit.pointerEvents, 'none', 'Motion must remain wheel-hit-testable')
+  assert.notEqual(firstDownwardExit.motionShield, 'none', 'Motion shield must block accidental clicks without blocking wheel input')
+  assert.equal(firstDownwardExit.cardOverflow, 'hidden', 'Calendar card must clip moving week content')
+  assert.equal(firstDownwardExit.noPageOverflow, true, 'Calendar motion must not create page overflow')
+
+  const nativeDownDuringExit = await dispatchNativeCalendarWheel(120)
+  assert.deepEqual(
+    nativeDownDuringExit,
+    { deltaY: 120, trusted: true, targetInsideGrid: true, defaultPrevented: true },
+    'A real hit-tested wheel must reach and interrupt the moving calendar grid',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'exit'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'down'
+      && Number(document.querySelector('.calendar-grid')?.dataset.weekMotionSequence)
+        > ${firstDownwardExit.sequence}
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, 7))}`,
+    'second downward motion after fast-forwarding the interrupted exit',
+  )
+  const secondDownwardExit = await calendarMotionSnapshot()
+  assert.ok(secondDownwardExit, 'Second downward exit motion must be measurable')
+  assert.equal(secondDownwardExit.animationDuration, '0.075s')
+  assert.notEqual(
+    secondDownwardExit.animationName,
+    firstDownwardExit.animationName,
+    'Sequence alternation must restart the same-direction CSS animation',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'enter'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'down'
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, 14))}`,
+    'two accepted downward inputs committed exactly two weeks',
+  )
+  const secondDownwardEnter = await calendarMotionSnapshot()
+  assert.equal(secondDownwardEnter?.animationDuration, '0.115s')
+  assert.match(secondDownwardEnter?.animationName ?? '', /^calendar-week-enter-from-bottom(?:-alternate)?$/)
+
+  // During enter the prior shift is already committed. The next input cancels
+  // only the remaining visual tail and begins its own opposite-direction exit.
+  const nativeUpDuringEnter = await dispatchNativeCalendarWheel(-120)
+  assert.deepEqual(
+    nativeUpDuringEnter,
+    { deltaY: -120, trusted: true, targetInsideGrid: true, defaultPrevented: true },
+    'Opposite native wheel during enter must be accepted immediately',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'exit'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'up'
+      && Number(document.querySelector('.calendar-grid')?.dataset.weekMotionSequence)
+        > ${secondDownwardExit.sequence}
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, 14))}`,
+    'upward exit immediately replaced the interrupted enter',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'enter'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'up'
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, 7))}`,
+    'down, down, up wheel sequence preserved the exact algebraic one-week shift',
+  )
+  const upwardEnter = await calendarMotionSnapshot()
+  assert.equal(upwardEnter?.animationDuration, '0.115s')
+  assert.match(upwardEnter?.animationName ?? '', /^calendar-week-enter-from-top(?:-alternate)?$/)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.viewStart === ${JSON.stringify(addDaysKey(wheelStart, 7))}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase
+      && !document.querySelector('.calendar-grid')?.hasAttribute('aria-busy')`,
+    'interruptible three-input sequence settled without losing a wheel input',
+  )
+
+  // Reversing direction during exit commits the pending first input and then
+  // applies the second, so the two accepted inputs cancel exactly.
+  const oppositeExitStart = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.equal(oppositeExitStart.defaultPrevented, true)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'exit'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'down'`,
+    'opposite-direction exit setup',
+  )
+  const oppositeExitSequence = await runIn(
+    mainWindow,
+    `Number(document.querySelector('.calendar-grid')?.dataset.weekMotionSequence)`,
+  )
+  const reverseDuringExit = await dispatchCalendarWheel({ deltaY: -120 })
+  assert.equal(reverseDuringExit.defaultPrevented, true)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekMotionPhase === 'exit'
+      && document.querySelector('.calendar-grid')?.dataset.weekMotionDirection === 'up'
+      && Number(document.querySelector('.calendar-grid')?.dataset.weekMotionSequence)
+        > ${oppositeExitSequence}
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, 14))}`,
+    'opposite wheel replaced an active exit after committing it',
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.viewStart === ${JSON.stringify(addDaysKey(wheelStart, 7))}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase`,
+    'opposite exit inputs cancelled without drift or loss',
+  )
+  const downwardSettled = await calendarMotionSnapshot()
+  assert.equal(downwardSettled?.stableContained, true, 'Settled calendar grid must remain inside its card')
+  assert.equal(downwardSettled?.noPageOverflow, true)
+
+  if (wheelDebuggerAttachedHere && wheelDebugger.isAttached()) wheelDebugger.detach()
+  if (!wasMainWindowVisibleForWheelQa) mainWindow.hide()
+
+  // Reduced-motion users apply every accepted input immediately, without
+  // transient classes, busy state, or either short animation phase.
+  await runIn(mainWindow, `(() => {
+    window.__daylineQaOriginalMatchMedia = window.matchMedia
+    const original = window.matchMedia.bind(window)
+    window.matchMedia = (query) => query === '(prefers-reduced-motion: reduce)'
+      ? { matches: true, media: query }
+      : original(query)
+  })()`)
+  const reducedMotionStartedAt = Date.now()
+  const reducedMotionWheel = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.equal(reducedMotionWheel.defaultPrevented, true)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.viewStart
+      === ${JSON.stringify(addDaysKey(wheelStart, 14))}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase
+      && !document.querySelector('.calendar-grid')?.hasAttribute('aria-busy')`,
+    'reduced-motion calendar viewport immediately advanced exactly one week',
+  )
+  const reducedMotionReverse = await dispatchCalendarWheel({ deltaY: -120 })
+  assert.equal(reducedMotionReverse.defaultPrevented, true)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.viewStart
+      === ${JSON.stringify(addDaysKey(wheelStart, 7))}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase
+      && !document.querySelector('.calendar-grid')?.hasAttribute('aria-busy')`,
+    'reduced-motion opposite wheel immediately returned exactly one week',
+  )
+  const reducedMotionElapsed = Date.now() - reducedMotionStartedAt
+  const reducedMotionState = await calendarMotionSnapshot()
+  assert.ok(reducedMotionElapsed < 150, `Reduced motion must skip both exit/enter timer pairs: ${reducedMotionElapsed}ms`)
+  assert.equal(reducedMotionState?.phase, null)
+  assert.equal(reducedMotionState?.direction, null)
+  assert.equal(reducedMotionState?.busy, null)
+  assert.equal(reducedMotionState?.stableContained, true)
+  await runIn(mainWindow, `(() => {
+    window.matchMedia = window.__daylineQaOriginalMatchMedia
+    delete window.__daylineQaOriginalMatchMedia
+    return true
+  })()`)
+
+  const calendarAlignmentSnapshot = () => runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    const selects = document.querySelectorAll('.month-jump select')
+    const year = Number(selects[0]?.value)
+    const monthIndex = Number(selects[1]?.value)
+    const first = new Date(year, monthIndex, 1, 12)
+    first.setDate(first.getDate() - first.getDay())
+    const expectedStart = [
+      first.getFullYear(),
+      String(first.getMonth() + 1).padStart(2, '0'),
+      String(first.getDate()).padStart(2, '0'),
+    ].join('-')
+    return {
+      viewStart: grid?.dataset.viewStart ?? null,
+      expectedStart,
+      headerYear: year,
+      headerMonth: monthIndex,
+      rangeStart: grid?.dataset.rangeStart ?? null,
+      rangeEnd: grid?.dataset.rangeEnd ?? null,
+      sidebarDate: document.querySelector('.day-panel-header h2')?.textContent.trim() ?? null,
+      noteIds: [...document.querySelectorAll(
+        '.day-panel [data-qa="quick-note-section"] [data-daily-note-id]',
+      )].map((note) => note.dataset.dailyNoteId),
+      taskIds: [...document.querySelectorAll(
+        '[data-qa="schedule-section"] .day-task-list > [data-task-id]',
+      )].map((task) => task.dataset.taskId),
+      motionPhase: grid?.dataset.weekMotionPhase ?? null,
+      busy: grid?.getAttribute('aria-busy') ?? null,
+    }
+  })()`)
+  const comparableCalendarContext = (snapshot) => ({
+    rangeStart: snapshot.rangeStart,
+    rangeEnd: snapshot.rangeEnd,
+    sidebarDate: snapshot.sidebarDate,
+    noteIds: snapshot.noteIds,
+    taskIds: snapshot.taskIds,
+  })
+
+  // First cover the common case: one accepted week from the canonical month
+  // grid must snap back without changing the selected day or its sidebar.
+  const oneWeekOffBaseline = await calendarAlignmentSnapshot()
+  assert.equal(oneWeekOffBaseline.viewStart, addDaysKey(wheelStart, 7))
+  assert.notEqual(
+    oneWeekOffBaseline.viewStart,
+    oneWeekOffBaseline.expectedStart,
+    'One-week OFF alignment setup must begin from a non-canonical month grid',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="appearance"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'true'`,
+    'persisted week-scroll switch before one-week alignment',
+  )
+  await runIn(mainWindow, `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'false'
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(oneWeekOffBaseline.expectedStart)}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase`,
+    'one-week rolled viewport aligned when week scrolling was disabled',
+  )
+  const oneWeekOffResult = await calendarAlignmentSnapshot()
+  assert.deepEqual(
+    comparableCalendarContext(oneWeekOffResult),
+    comparableCalendarContext(oneWeekOffBaseline),
+    'One-week OFF alignment must preserve the selected date and right sidebar',
+  )
+  assert.equal(oneWeekOffResult.viewStart, oneWeekOffBaseline.expectedStart)
+  const oneWeekOffWheel = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.deepEqual(oneWeekOffWheel, {
+    defaultPrevented: false,
+    start: oneWeekOffBaseline.expectedStart,
+  })
+
+  // Re-enable and move the viewport three weeks. Its authoritative center now
+  // belongs to the next header month, whose canonical grid has a different
+  // first Sunday than the month from which scrolling started.
+  await runIn(mainWindow, `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'true'
+      && document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'true'`,
+    're-enabled week scrolling for month-boundary alignment',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
+  await runIn(mainWindow, `(() => {
+    window.__daylineQaAlignmentOriginalMatchMedia = window.matchMedia
+    const original = window.matchMedia.bind(window)
+    window.matchMedia = (query) => query === '(prefers-reduced-motion: reduce)'
+      ? { matches: true, media: query }
+      : original(query)
+    return true
+  })()`)
+  for (let week = 1; week <= 3; week += 1) {
+    const boundaryWheel = await dispatchCalendarWheel({ deltaY: 120 })
+    assert.equal(boundaryWheel.defaultPrevented, true)
+    await waitForRenderer(
+      mainWindow,
+      `document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(addDaysKey(wheelStart, week * 7))}`,
+      `month-boundary setup week ${week}`,
+    )
+  }
+  await runIn(mainWindow, `(() => {
+    window.matchMedia = window.__daylineQaAlignmentOriginalMatchMedia
+    delete window.__daylineQaAlignmentOriginalMatchMedia
+    return true
+  })()`)
+  const weekScrollOffBaseline = await calendarAlignmentSnapshot()
+  assert.equal(weekScrollOffBaseline.viewStart, addDaysKey(wheelStart, 21))
+  assert.notEqual(
+    weekScrollOffBaseline.viewStart,
+    weekScrollOffBaseline.expectedStart,
+    'Month-boundary OFF alignment setup must begin from a non-canonical grid',
+  )
+  assert.notEqual(
+    weekScrollOffBaseline.expectedStart,
+    oneWeekOffBaseline.expectedStart,
+    'Crossing the viewport-center month boundary must choose the new header month grid',
+  )
+
+  // Keep General Settings open before starting the short motion. A mutation
+  // observer switches OFF on the exact render that exposes the exit phase, so
+  // this assertion cannot accidentally sample after the 75 ms exit timer.
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="appearance"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'true'`,
+    'general settings before active-exit cancellation',
+  )
+  const activeDisable = await runIn(mainWindow, `new Promise((resolve, reject) => {
+    const grid = document.querySelector('.calendar-grid')
+    const toggle = document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+    if (!grid || !toggle) {
+      reject(new Error('Week-scroll grid or toggle was not available'))
+      return
+    }
+    const timeout = window.setTimeout(() => {
+      observer.disconnect()
+      reject(new Error('Week-scroll exit phase was not rendered'))
+    }, 500)
+    const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 })
+    const observer = new MutationObserver(() => {
+      if (grid.dataset.weekMotionPhase !== 'exit') return
+      const started = {
+        defaultPrevented: event.defaultPrevented,
+        phase: grid.dataset.weekMotionPhase,
+        start: grid.dataset.viewStart ?? null,
+      }
+      observer.disconnect()
+      window.clearTimeout(timeout)
+      toggle.click()
+      resolve({ started, toggleClicked: true })
+    })
+    observer.observe(grid, { attributes: true, attributeFilter: ['data-week-motion-phase'] })
+    grid.dispatchEvent(event)
+  })`)
+  assert.deepEqual(activeDisable, {
+    started: {
+      defaultPrevented: true,
+      phase: 'exit',
+      start: addDaysKey(wheelStart, 21),
+    },
+    toggleClicked: true,
+  })
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'false'
+      && document.querySelector('[data-qa="calendar-week-scroll-state"]')?.textContent.trim() === 'OFF'
+      && document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'false'
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(weekScrollOffBaseline.expectedStart)}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase
+      && !document.querySelector('.calendar-grid')?.hasAttribute('aria-busy')
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.settings?.calendarWeekScroll === false`,
+    'disabled week scrolling aligned the active viewport to its displayed month',
+  )
+  const weekScrollOffResult = await runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    return {
+      viewStart: grid?.dataset.viewStart ?? null,
+      rangeStart: grid?.dataset.rangeStart ?? null,
+      rangeEnd: grid?.dataset.rangeEnd ?? null,
+      sidebarDate: document.querySelector('.day-panel-header h2')?.textContent.trim() ?? null,
+      noteIds: [...document.querySelectorAll(
+        '.day-panel [data-qa="quick-note-section"] [data-daily-note-id]',
+      )].map((note) => note.dataset.dailyNoteId),
+      taskIds: [...document.querySelectorAll(
+        '[data-qa="schedule-section"] .day-task-list > [data-task-id]',
+      )].map((task) => task.dataset.taskId),
+    }
+  })()`)
+  assert.deepEqual(
+    comparableCalendarContext(weekScrollOffResult),
+    comparableCalendarContext(weekScrollOffBaseline),
+    'Month-boundary OFF alignment must preserve the selected date and right sidebar',
+  )
+  assert.equal(weekScrollOffResult.viewStart, weekScrollOffBaseline.expectedStart)
+  await sleep(260)
+  const weekScrollOffSettled = await calendarAlignmentSnapshot()
+  assert.equal(
+    weekScrollOffSettled.viewStart,
+    weekScrollOffBaseline.expectedStart,
+    'Cancelled motion timers must not drift the aligned viewport after OFF',
+  )
+  assert.equal(weekScrollOffSettled.motionPhase, null)
+  assert.equal(weekScrollOffSettled.busy, null)
+
+  // Repeat the interruption after the exit has committed and the incoming
+  // week is animating. OFF must use the committed viewport, cancel the enter
+  // tail, and remain aligned after the original completion deadline passes.
+  await runIn(mainWindow, `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'true'
+      && document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'true'`,
+    're-enabled week scrolling for active-enter cancellation',
+  )
+  const enterDisableBaseline = await calendarAlignmentSnapshot()
+  const activeEnterDisable = await runIn(mainWindow, `new Promise((resolve, reject) => {
+    const grid = document.querySelector('.calendar-grid')
+    const toggle = document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+    if (!grid || !toggle) {
+      reject(new Error('Week-scroll grid or toggle was not available'))
+      return
+    }
+    const timeout = window.setTimeout(() => {
+      observer.disconnect()
+      reject(new Error('Week-scroll enter phase was not rendered'))
+    }, 500)
+    const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 })
+    const observer = new MutationObserver(() => {
+      if (grid.dataset.weekMotionPhase !== 'enter') return
+      const started = {
+        defaultPrevented: event.defaultPrevented,
+        phase: grid.dataset.weekMotionPhase,
+        start: grid.dataset.viewStart ?? null,
+      }
+      observer.disconnect()
+      window.clearTimeout(timeout)
+      toggle.click()
+      resolve({ started, toggleClicked: true })
+    })
+    observer.observe(grid, { attributes: true, attributeFilter: ['data-week-motion-phase'] })
+    grid.dispatchEvent(event)
+  })`)
+  assert.deepEqual(activeEnterDisable, {
+    started: {
+      defaultPrevented: true,
+      phase: 'enter',
+      start: addDaysKey(enterDisableBaseline.expectedStart, 7),
+    },
+    toggleClicked: true,
+  })
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-qa="calendar-week-scroll-toggle"]')
+      ?.getAttribute('aria-checked') === 'false'
+      && document.querySelector('.calendar-grid')?.dataset.viewStart
+        === ${JSON.stringify(enterDisableBaseline.expectedStart)}
+      && !document.querySelector('.calendar-grid')?.dataset.weekMotionPhase
+      && !document.querySelector('.calendar-grid')?.hasAttribute('aria-busy')`,
+    'active enter cancelled and aligned when week scrolling was disabled',
+  )
+  await sleep(260)
+  const enterDisableResult = await calendarAlignmentSnapshot()
+  assert.equal(
+    enterDisableResult.viewStart,
+    enterDisableBaseline.expectedStart,
+    'Cancelled enter timer must not drift the aligned viewport after OFF',
+  )
+  assert.equal(enterDisableResult.motionPhase, null)
+  assert.equal(enterDisableResult.busy, null)
+  assert.deepEqual(
+    comparableCalendarContext(enterDisableResult),
+    comparableCalendarContext(enterDisableBaseline),
+    'Active-enter OFF alignment must preserve the selected date and right sidebar',
+  )
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-qa="appearance-panel"]')
+      && document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'false'`,
+    'closed general settings after aligned week-scroll disable',
+  )
+  const offWheel = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.deepEqual(offWheel, {
+    defaultPrevented: false,
+    start: weekScrollOffBaseline.expectedStart,
+  })
+  await mainWindow.webContents.removeInsertedCSS(calendarMotionCssKey)
+
+  // OFF is persisted, and a fresh renderer starts on the canonical first
+  // Sunday for its displayed month. Wheel input must remain an untouched no-op.
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('.calendar-grid')?.dataset.weekScrollEnabled === 'false'
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.settings?.calendarWeekScroll === false`,
+    'persisted week-scroll OFF after renderer reload',
+  )
+  const reloadedWeekScrollState = await runIn(mainWindow, `(() => {
+    const grid = document.querySelector('.calendar-grid')
+    const selects = document.querySelectorAll('.month-jump select')
+    const first = new Date(Number(selects[0]?.value), Number(selects[1]?.value), 1, 12)
+    first.setDate(first.getDate() - first.getDay())
+    const expectedStart = [
+      first.getFullYear(),
+      String(first.getMonth() + 1).padStart(2, '0'),
+      String(first.getDate()).padStart(2, '0'),
+    ].join('-')
+    return {
+      viewStart: grid?.dataset.viewStart ?? null,
+      expectedStart,
+      motionPhase: grid?.dataset.weekMotionPhase ?? null,
+      busy: grid?.getAttribute('aria-busy') ?? null,
+    }
+  })()`)
+  assert.deepEqual(
+    reloadedWeekScrollState,
+    {
+      viewStart: reloadedWeekScrollState.expectedStart,
+      expectedStart: reloadedWeekScrollState.expectedStart,
+      motionPhase: null,
+      busy: null,
+    },
+    'Reloaded week-scroll OFF calendar must remain month-aligned and motion-free',
+  )
+  const reloadedOffWheel = await dispatchCalendarWheel({ deltaY: 120 })
+  assert.deepEqual(reloadedOffWheel, {
+    defaultPrevented: false,
+    start: reloadedWeekScrollState.expectedStart,
+  })
+
+  await runIn(mainWindow, `document.querySelector('[data-rail-action="appearance"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector('[data-qa="appearance-panel"] [data-qa="font-scale"]'))`,
+    'reopened general settings after wheel acceptance',
   )
   assert.equal(
     await runIn(mainWindow, `Boolean(document.querySelector(
@@ -4511,7 +5517,7 @@ app.whenReady().then(async () => {
       && !document.querySelector('[data-qa="appearance-panel"] [data-tag-id]')`,
     'appearance setting control persistence and separation',
   )
-  await runIn(mainWindow, `document.querySelector('[aria-label="화면 설정 닫기"]')?.click()`)
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('[data-qa="appearance-panel"]')
@@ -4941,7 +5947,7 @@ app.whenReady().then(async () => {
     `getComputedStyle(document.documentElement).getPropertyValue('--font-10').trim() === '15px'`,
     'maximum font scale',
   )
-  await runIn(mainWindow, `document.querySelector('[aria-label="화면 설정 닫기"]')?.click()`)
+  await runIn(mainWindow, `document.querySelector('[aria-label="일반 설정 닫기"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('[data-qa="appearance-panel"]')
@@ -4974,6 +5980,9 @@ app.whenReady().then(async () => {
       const taskList = document.querySelector('[data-qa="schedule-section"] .day-task-list')
       const calendarGrid = document.querySelector('.calendar-grid')
       const calendarCells = [...document.querySelectorAll('.calendar-grid > .calendar-cell[data-date]')]
+      const noteRows = [...document.querySelectorAll(
+        '[data-qa="quick-note-section"] .daily-note-item[data-daily-note-id]',
+      )]
       const rail = document.querySelector('.side-rail')
       const primaryRailActions = [...document.querySelectorAll(
         '.side-rail > nav [data-rail-action]',
@@ -5132,6 +6141,30 @@ app.whenReady().then(async () => {
               - helpRailAction.getBoundingClientRect().bottom <= 32,
           }
         })(),
+        quickNoteGeometry: noteRows.map((row) => {
+          const rowBounds = rect(row)
+          const controls = [...row.querySelectorAll(
+            '.note-check, .note-content, [data-qa="quick-note-pin"], .note-delete, .reorder-handle',
+          )]
+          return {
+            id: row.dataset.dailyNoteId,
+            pinned: row.dataset.notePinned === 'true',
+            row: rowBounds,
+            controlCount: controls.length,
+            allContained: controls.every((control) => {
+              const bounds = control.getBoundingClientRect()
+              return bounds.left >= rowBounds.left - 1
+                && bounds.right <= rowBounds.right + 1
+                && bounds.top >= rowBounds.top - 1
+                && bounds.bottom <= rowBounds.bottom + 1
+            }),
+            pinRole: row.querySelector('[data-qa="quick-note-pin"]')?.tagName,
+            pinPressed: row.querySelector('[data-qa="quick-note-pin"]')
+              ?.getAttribute('aria-pressed'),
+            pinLabel: row.querySelector('[data-qa="quick-note-pin"]')
+              ?.getAttribute('aria-label') ?? '',
+          }
+        }),
       }
     })()
   `)
@@ -5190,6 +6223,24 @@ app.whenReady().then(async () => {
   assert.equal(minimumLayout.railGeometry.recoveryBelowUpdate, true)
   assert.equal(minimumLayout.railGeometry.helpBelowRecovery, true, 'Help must remain below recovery')
   assert.equal(minimumLayout.railGeometry.helpNearBottom, true, 'Help must remain anchored at rail bottom')
+  assert.ok(minimumLayout.quickNoteGeometry.length > 0, '150% sidebar must retain quick-note rows')
+  assert.equal(
+    minimumLayout.quickNoteGeometry.every((row) => row.allContained),
+    true,
+    `All pin and note controls must stay inside the 150% sidebar rows: ${JSON.stringify(minimumLayout.quickNoteGeometry)}`,
+  )
+  assert.equal(
+    minimumLayout.quickNoteGeometry.every((row) => row.controlCount === 5),
+    true,
+    `Native quick notes must expose check/content/pin/delete/reorder without implicit grid wrapping: ${JSON.stringify(minimumLayout.quickNoteGeometry)}`,
+  )
+  assert.equal(
+    minimumLayout.quickNoteGeometry.every((row) => row.pinRole === 'BUTTON'
+      && ['true', 'false'].includes(row.pinPressed)
+      && row.pinLabel.startsWith('퀵 노트 고정')),
+    true,
+    `Every quick-note pin must remain keyboard accessible and labelled: ${JSON.stringify(minimumLayout.quickNoteGeometry)}`,
+  )
   console.log(
     `Minimum calendar overlay: lanes=${minimumLayout.calendarGeometry.maxLanes}, `
       + `segments=${minimumLayout.calendarGeometry.segmentCount}, `
@@ -5505,7 +6556,7 @@ app.whenReady().then(async () => {
   const minimumAppearancePanel = await inspectMinimumRailPanel(
     'appearance',
     'appearance-panel',
-    '화면 설정 닫기',
+    '일반 설정 닫기',
   )
   assert.equal(minimumAppearancePanel.hasAppearanceControls, true)
   assert.equal(minimumAppearancePanel.hasTagControls, false)

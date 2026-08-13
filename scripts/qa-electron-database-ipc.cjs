@@ -21,6 +21,7 @@ fs.writeFileSync(
       widgetSplit: 50,
       fontScale: 1,
       themeColor: '#255F4B',
+      calendarWeekScroll: false,
     },
     taskTemplates: [],
   }),
@@ -503,7 +504,7 @@ app.whenReady().then(async () => {
   await Promise.all([
     applyIn(mainWindow, [{
       type: 'settings:patch',
-      changes: { sidebarSplit: 33, fontScale: 1.2 },
+      changes: { sidebarSplit: 33, fontScale: 1.2, calendarWeekScroll: true },
     }]),
     applyIn(widgetWindow, [{
       type: 'settings:patch',
@@ -516,6 +517,7 @@ app.whenReady().then(async () => {
     widgetSplit: 67,
     fontScale: 1.2,
     themeColor: '#446688',
+    calendarWeekScroll: true,
   })
 
   const customTagId = crypto.randomUUID()
@@ -627,7 +629,7 @@ app.whenReady().then(async () => {
 
   assert.equal(fs.existsSync(path.join(qaDirectory, 'dayline.db')), true)
   const inspected = new DatabaseSync(path.join(qaDirectory, 'dayline.db'), { readOnly: true })
-  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 4)
+  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 5)
   assert.equal(inspected.prepare('PRAGMA quick_check').get().quick_check, 'ok')
   assert.deepEqual(inspected.prepare('PRAGMA foreign_key_check').all(), [])
   assert.ok(inspected.prepare(`SELECT COUNT(*) AS count FROM sub_tasks`).get().count >= 152)
@@ -642,7 +644,7 @@ app.whenReady().then(async () => {
   )
   assert.deepEqual(
     { ...inspected.prepare(`
-      SELECT sidebar_split, widget_split, font_scale, theme_color
+      SELECT sidebar_split, widget_split, font_scale, theme_color, calendar_week_scroll
       FROM app_settings
     `).get() },
     {
@@ -650,6 +652,7 @@ app.whenReady().then(async () => {
       widget_split: 67,
       font_scale: 1.2,
       theme_color: '#446688',
+      calendar_week_scroll: 1,
     },
   )
   assert.deepEqual(

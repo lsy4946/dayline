@@ -34,6 +34,7 @@ export interface DailyNote {
   noteDate: string
   completed: boolean
   completedAt: string | null
+  pinned: boolean
   position: number
   createdAt: string
   updatedAt: string
@@ -55,6 +56,7 @@ export interface AppSettings {
   widgetSplit: number
   fontScale: number
   themeColor: string
+  calendarWeekScroll: boolean
 }
 
 export interface TaskTemplate {
@@ -111,7 +113,7 @@ export type SubTaskPatch = Partial<Pick<
 
 export type DailyNotePatch = Partial<Pick<
   DailyNote,
-  'content' | 'noteDate' | 'completed' | 'completedAt' | 'position' | 'updatedAt'
+  'content' | 'noteDate' | 'completed' | 'completedAt' | 'pinned' | 'position' | 'updatedAt'
 >>
 
 export type TaskTagPatch = Partial<Pick<

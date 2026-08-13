@@ -76,17 +76,25 @@ export function shiftMonth(date: Date, amount: number): Date {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1, 12, 0, 0, 0)
 }
 
-export function calendarDays(month: Date): CalendarDay[] {
+export function calendarGridStart(month: Date): Date {
   const first = startOfMonth(month)
-  const gridStart = addDays(first, -first.getDay())
+  return addDays(first, -first.getDay())
+}
+
+export function calendarDaysFromStart(gridStart: Date, currentMonth: Date): CalendarDay[] {
   return Array.from({ length: 42 }, (_, index) => {
     const date = addDays(gridStart, index)
     return {
       key: toDateKey(date),
       date,
-      inCurrentMonth: date.getMonth() === month.getMonth(),
+      inCurrentMonth: date.getMonth() === currentMonth.getMonth()
+        && date.getFullYear() === currentMonth.getFullYear(),
     }
   })
+}
+
+export function calendarDays(month: Date): CalendarDay[] {
+  return calendarDaysFromStart(calendarGridStart(month), month)
 }
 export function formatMonthTitle(date: Date): string {
   return new Intl.DateTimeFormat('ko-KR', {

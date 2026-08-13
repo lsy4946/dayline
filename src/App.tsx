@@ -20,7 +20,6 @@ import {
   Maximize2,
   MonitorUp,
   PanelLeftOpen,
-  Palette,
   Pin,
   PinOff,
   Plus,
@@ -52,6 +51,7 @@ import {
 import {
   addDaysKey,
   calendarDays,
+  calendarDaysFromStart,
   dateRangeContains,
   formatCompactDate,
   formatFullDate,
@@ -65,6 +65,7 @@ import {
   weekDaysAround,
 } from './domain/date'
 import { layoutCalendarTaskSegments, type CalendarTaskSegment } from './domain/calendarLayout'
+import { dailyNotesForDate, shouldLingerAfterForeignUnpin } from './domain/dailyNotes'
 import { getCalendarDayTone, getKoreanHoliday } from './domain/koreanHolidays'
 import { parseReleaseNotes } from './domain/releaseNotes'
 import {
@@ -309,9 +310,9 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
   },
   {
     target: 'appearance',
-    eyebrow: '화면 설정',
-    title: '글자 크기와 테마 색상을 조절해요',
-    description: '화면 배율을 85%부터 150%까지 바꾸고 앱 전체 강조색을 선택할 수 있습니다. 설정은 메인 창과 위젯에 함께 적용돼요.',
+    eyebrow: '일반 설정',
+    title: '화면과 달력 탐색 방식을 조절해요',
+    description: '화면 배율과 테마 색상을 바꾸고, 달력 위에서 스크롤할 때 한 주씩 이동할지 선택할 수 있습니다.',
     example: (
       <div className="help-example-appearance"><span>A</span><i><b /></i><strong>110%</strong><em style={{ background: '#4f86c6' }} /></div>
     ),
@@ -485,6 +486,53 @@ function droppedIds(ids: string[], draggedId: string, targetId: string) {
   return next
 }
 
+function useVisibleDailyNotes(
+  dailyNotes: DailyNote[],
+  selectedDate: string,
+  onToggle: (id: string) => void,
+  onPinToggle: (id: string) => void,
+) {
+  const [lingerDates, setLingerDates] = useState<Map<string, string>>(() => new Map())
+  const previousSelectedDateRef = useRef(selectedDate)
+
+  useEffect(() => {
+    if (previousSelectedDateRef.current === selectedDate) return
+    previousSelectedDateRef.current = selectedDate
+    setLingerDates((current) => current.size === 0 ? current : new Map())
+  }, [selectedDate])
+
+  const nativeNotes = useMemo(
+    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
+    [dailyNotes, selectedDate],
+  )
+  const visibleNotes = useMemo(
+    () => dailyNotesForDate(dailyNotes, selectedDate, lingerDates),
+    [dailyNotes, lingerDates, selectedDate],
+  )
+
+  const retainBeforeForeignUnpin = useCallback((id: string) => {
+    const note = dailyNotes.find((value) => value.id === id)
+    if (!note || !shouldLingerAfterForeignUnpin(note, selectedDate)) return
+    setLingerDates((current) => {
+      if (current.get(id) === selectedDate) return current
+      const next = new Map(current)
+      next.set(id, selectedDate)
+      return next
+    })
+  }, [dailyNotes, selectedDate])
+
+  const toggleNote = useCallback((id: string) => {
+    onToggle(id)
+  }, [onToggle])
+
+  const togglePin = useCallback((id: string) => {
+    retainBeforeForeignUnpin(id)
+    onPinToggle(id)
+  }, [onPinToggle, retainBeforeForeignUnpin])
+
+  return { nativeNotes, visibleNotes, toggleNote, togglePin }
+}
+
 function parseTaskDateDragPayload(raw: string): TaskDateDragPayload | null {
   try {
     const value = JSON.parse(raw) as Partial<TaskDateDragPayload>
@@ -583,6 +631,7 @@ function useTaskStore() {
       widgetSplit: 58,
       fontScale: 1,
       themeColor: '#255f4b',
+      calendarWeekScroll: false,
     },
     taskTemplates: [],
     migrationWarning: null,
@@ -1130,6 +1179,7 @@ function DailyNotesSection({
   onCreate,
   onUpdate,
   onToggle,
+  onPinToggle,
   onDelete,
   onMove,
   onDropNote,
@@ -1145,6 +1195,7 @@ function DailyNotesSection({
   onCreate: (noteDate: string, content: string) => boolean
   onUpdate: (id: string, content: string) => boolean
   onToggle: (id: string) => void
+  onPinToggle: (id: string) => void
   onDelete: (id: string) => void
   onMove?: (id: string, direction: ReorderDirection) => void
   onDropNote?: (draggedId: string, targetId: string) => void
@@ -1154,11 +1205,6 @@ function DailyNotesSection({
   const [content, setContent] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const editorRef = useRef<HTMLTextAreaElement>(null)
-
-  const sortedNotes = useMemo(
-    () => sortedPositioned(notes),
-    [notes],
-  )
 
   useEffect(() => {
     if (!composerOpen) return
@@ -1260,25 +1306,29 @@ function DailyNotesSection({
       )}
 
       <div className="daily-note-list">
-        {sortedNotes.length === 0 && !composerOpen ? (
+        {notes.length === 0 && !composerOpen ? (
           <button type="button" className="daily-note-empty" onClick={() => onComposerOpenChange(true)}>
             <FileText size={23} />
             <strong>떠오른 일을 바로 적어보세요</strong>
             <span>제목이나 마감일 없이 선택한 날짜의 메모로 남아요.</span>
           </button>
         ) : (
-          sortedNotes.map((note) => (
+          notes.map((note) => {
+            const canReorder = reorderable && note.noteDate === selectedDate
+            return (
             <article
               key={note.id}
               data-daily-note-id={note.id}
-              className={`daily-note-item ${note.completed ? 'is-completed' : ''}`}
+              data-note-date={note.noteDate}
+              data-note-pinned={note.pinned || undefined}
+              className={`daily-note-item ${note.completed ? 'is-completed' : ''} ${note.pinned ? 'is-pinned' : ''} ${canReorder ? 'has-reorder' : ''}`}
               onDragOver={(event) => {
-                if (!reorderable || !event.dataTransfer.types.includes('application/x-dayline-daily-note')) return
+                if (!canReorder || !event.dataTransfer.types.includes('application/x-dayline-daily-note')) return
                 event.preventDefault()
                 event.dataTransfer.dropEffect = 'move'
               }}
               onDrop={(event) => {
-                if (!reorderable) return
+                if (!canReorder) return
                 const draggedId = event.dataTransfer.getData('application/x-dayline-daily-note')
                 if (!draggedId) return
                 event.preventDefault()
@@ -1286,7 +1336,7 @@ function DailyNotesSection({
               }}
               onContextMenu={(event) => {
                 event.preventDefault()
-                if ((event.target as HTMLElement).closest('.note-delete')) return
+                if ((event.target as HTMLElement).closest('.note-delete, .note-pin, .reorder-handle')) return
                 onToggle(note.id)
               }}
             >
@@ -1315,11 +1365,24 @@ function DailyNotesSection({
               <IconButton label="퀵 노트 삭제" className="note-delete" onClick={() => onDelete(note.id)}>
                 <Trash2 size={13} />
               </IconButton>
-              {reorderable && onMove && (
+              <button
+                type="button"
+                className={`icon-button note-pin ${note.pinned ? 'is-active' : ''}`}
+                data-qa="quick-note-pin"
+                data-note-id={note.id}
+                aria-label={`${note.pinned ? '퀵 노트 고정 해제' : '퀵 노트 고정'}: ${note.content}`}
+                aria-pressed={note.pinned}
+                title={note.pinned ? '모든 날짜에서 표시 중 · 클릭하여 고정 해제' : '모든 날짜에서 표시'}
+                onClick={() => onPinToggle(note.id)}
+              >
+                <Pin size={13} fill={note.pinned ? 'currentColor' : 'none'} />
+              </button>
+              {canReorder && onMove && (
                 <ReorderHandle kind="daily-note" id={note.id} label="퀵 노트" onMove={onMove} />
               )}
             </article>
-          ))
+            )
+          })
         )}
       </div>
     </section>
@@ -2685,7 +2748,7 @@ function TagManagerRow({
   )
 }
 
-function AppearancePanel({
+function GeneralSettingsPanel({
   settings,
   onSettingsChange,
   onClose,
@@ -2697,10 +2760,31 @@ function AppearancePanel({
   return (
     <aside id="rail-panel-appearance" className="rail-flyout" data-qa="appearance-panel" aria-labelledby="rail-action-appearance">
       <header className="flyout-header">
-        <div><span className="eyebrow">APPEARANCE</span><h2>화면 설정</h2></div>
-        <IconButton label="화면 설정 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
+        <div><span className="eyebrow">GENERAL</span><h2>일반 설정</h2></div>
+        <IconButton label="일반 설정 닫기" onClick={onClose} autoFocus><X size={17} /></IconButton>
       </header>
       <div className="settings-scroll">
+        <section className="settings-card">
+          <button
+            type="button"
+            className={`settings-toggle ${settings.calendarWeekScroll ? 'is-on' : ''}`}
+            role="switch"
+            aria-checked={settings.calendarWeekScroll}
+            data-qa="calendar-week-scroll-toggle"
+            onClick={() => onSettingsChange({ calendarWeekScroll: !settings.calendarWeekScroll })}
+          >
+            <span className="settings-toggle-copy">
+              <strong>스크롤하여 달력 내리기</strong>
+              <small>달력 위에서 스크롤하면 한 번에 한 주씩 이전·다음 기간으로 이동해요.</small>
+            </span>
+            <span className="settings-toggle-control" aria-hidden="true">
+              <span className="settings-toggle-state" data-qa="calendar-week-scroll-state">
+                {settings.calendarWeekScroll ? 'ON' : 'OFF'}
+              </span>
+              <span className="switch-track"><span /></span>
+            </span>
+          </button>
+        </section>
         <section className="settings-card">
           <div className="settings-heading"><span>글자·화면 배율</span><strong>{Math.round(settings.fontScale * 100)}%</strong></div>
           <input
@@ -3289,6 +3373,7 @@ interface SharedViewProps {
   onDailyNoteCreate: (noteDate: string, content: string) => boolean
   onDailyNoteUpdate: (id: string, content: string) => boolean
   onDailyNoteToggle: (id: string) => void
+  onDailyNotePinToggle: (id: string) => void
   onDailyNoteDelete: (id: string) => void
   onTaskReorder: (orderedIds: string[]) => boolean
   onTaskDateMove: (id: string, targetStart: string) => Task | null
@@ -3322,6 +3407,7 @@ function MainView(props: SharedViewProps) {
     onDailyNoteCreate,
     onDailyNoteUpdate,
     onDailyNoteToggle,
+    onDailyNotePinToggle,
     onDailyNoteDelete,
     onTaskReorder,
     onTaskDateMove,
@@ -3339,6 +3425,8 @@ function MainView(props: SharedViewProps) {
   } = props
   const today = todayKey()
   const [month, setMonth] = useState(() => startOfMonth(new Date()))
+  const [calendarViewStart, setCalendarViewStart] = useState(() => calendarDays(startOfMonth(new Date()))[0].key)
+  const calendarViewStartRef = useRef(calendarViewStart)
   const [selectedDate, setSelectedDate] = useState(today)
   const [search, setSearch] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
@@ -3359,12 +3447,87 @@ function MainView(props: SharedViewProps) {
   const [selectedRange, setSelectedRange] = useState(() => ({ startDate: today, endDate: today }))
   const [sidebarSplit, setSidebarSplit] = useState(settings.sidebarSplit)
   const [calendarMaxLanes, setCalendarMaxLanes] = useState(3)
+  const [calendarWeekMotion, setCalendarWeekMotion] = useState<{
+    direction: -1 | 1
+    phase: 'exit' | 'enter'
+    sequence: number
+  } | null>(null)
   const rangeAnchorRef = useRef<string | null>(null)
   const rangeMovedRef = useRef(false)
   const calendarGridRef = useRef<HTMLDivElement | null>(null)
+  const calendarWheelDeltaRef = useRef(0)
+  const calendarWheelDirectionRef = useRef<-1 | 0 | 1>(0)
+  const calendarWheelLastEventAtRef = useRef(0)
+  const calendarWeekMotionActiveRef = useRef(false)
+  const calendarWeekMotionRef = useRef<{
+    direction: -1 | 1
+    phase: 'exit' | 'enter'
+    sequence: number
+  } | null>(null)
+  const calendarWeekMotionSequenceRef = useRef(0)
+  const calendarWeekMotionTimersRef = useRef<number[]>([])
   const templateDragActivationTimerRef = useRef<number | null>(null)
   const promptedUpdateVersionsRef = useRef(new Set<string>())
   const updateActionInFlightRef = useRef(false)
+
+  const shiftCalendarViewport = useCallback((direction: -1 | 1) => {
+    const nextStart = addDaysKey(calendarViewStartRef.current, direction * 7)
+    const centerDate = fromDateKey(addDaysKey(nextStart, 20))
+    calendarViewStartRef.current = nextStart
+    setCalendarViewStart(nextStart)
+    setMonth(startOfMonth(centerDate))
+  }, [])
+
+  const cancelCalendarWeekMotion = useCallback(() => {
+    calendarWeekMotionTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    calendarWeekMotionTimersRef.current = []
+    calendarWeekMotionSequenceRef.current += 1
+    calendarWeekMotionActiveRef.current = false
+    calendarWeekMotionRef.current = null
+    setCalendarWeekMotion(null)
+  }, [])
+
+  const animateCalendarViewport = useCallback((direction: -1 | 1) => {
+    const interruptedMotion = calendarWeekMotionRef.current
+    calendarWeekMotionTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    calendarWeekMotionTimersRef.current = []
+    if (interruptedMotion?.phase === 'exit') {
+      shiftCalendarViewport(interruptedMotion.direction)
+    }
+    calendarWeekMotionRef.current = null
+    calendarWeekMotionActiveRef.current = false
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      shiftCalendarViewport(direction)
+      setCalendarWeekMotion(null)
+      return true
+    }
+
+    const sequence = calendarWeekMotionSequenceRef.current + 1
+    calendarWeekMotionSequenceRef.current = sequence
+    const exitMotion = { direction, phase: 'exit' as const, sequence }
+    calendarWeekMotionActiveRef.current = true
+    calendarWeekMotionRef.current = exitMotion
+    setCalendarWeekMotion(exitMotion)
+    const exitTimer = window.setTimeout(() => {
+      const currentMotion = calendarWeekMotionRef.current
+      if (!currentMotion || currentMotion.sequence !== sequence || currentMotion.phase !== 'exit') return
+      shiftCalendarViewport(direction)
+      const enterMotion = { direction, phase: 'enter' as const, sequence }
+      calendarWeekMotionRef.current = enterMotion
+      setCalendarWeekMotion(enterMotion)
+      const enterTimer = window.setTimeout(() => {
+        if (calendarWeekMotionRef.current?.sequence !== sequence) return
+        calendarWeekMotionTimersRef.current = []
+        calendarWeekMotionActiveRef.current = false
+        calendarWeekMotionRef.current = null
+        setCalendarWeekMotion(null)
+      }, 115)
+      calendarWeekMotionTimersRef.current = [enterTimer]
+    }, 75)
+    calendarWeekMotionTimersRef.current = [exitTimer]
+    return true
+  }, [shiftCalendarViewport])
 
   const closeRailPanel = useCallback(() => {
     const panel = railPanel
@@ -3399,6 +3562,27 @@ function MainView(props: SharedViewProps) {
       window.clearTimeout(templateDragActivationTimerRef.current)
     }
   }, [])
+
+  useEffect(() => () => {
+    calendarWeekMotionTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+    calendarWeekMotionTimersRef.current = []
+    calendarWeekMotionActiveRef.current = false
+    calendarWeekMotionRef.current = null
+  }, [])
+
+  useEffect(() => {
+    if (settings.calendarWeekScroll) return
+
+    cancelCalendarWeekMotion()
+    const viewportMonth = startOfMonth(fromDateKey(addDaysKey(calendarViewStartRef.current, 20)))
+    const alignedStart = calendarDays(viewportMonth)[0].key
+    calendarViewStartRef.current = alignedStart
+    setCalendarViewStart((current) => current === alignedStart ? current : alignedStart)
+    setMonth((current) => current.getFullYear() === viewportMonth.getFullYear()
+      && current.getMonth() === viewportMonth.getMonth()
+      ? current
+      : viewportMonth)
+  }, [cancelCalendarWeekMotion, settings.calendarWeekScroll])
 
   useEffect(() => {
     const updates = getRendererUpdatesApi()
@@ -3484,6 +3668,67 @@ function MainView(props: SharedViewProps) {
   }, [loading])
 
   useEffect(() => {
+    const grid = calendarGridRef.current
+    const resetWheelGesture = () => {
+      calendarWheelDeltaRef.current = 0
+      calendarWheelDirectionRef.current = 0
+      calendarWheelLastEventAtRef.current = 0
+    }
+    if (!grid || !settings.calendarWeekScroll) {
+      resetWheelGesture()
+      return
+    }
+
+    const handleCalendarWheel = (event: WheelEvent) => {
+      if (
+        event.ctrlKey
+        || event.metaKey
+        || event.shiftKey
+        || templateCalendarDragging
+        || rangeAnchorRef.current !== null
+        || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ) return
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.closest('input, select, textarea, a, [contenteditable="true"]')) return
+
+      for (let node: HTMLElement | null = target; node && node !== grid; node = node.parentElement) {
+        const overflowY = window.getComputedStyle(node).overflowY
+        if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight + 1) return
+      }
+
+      const now = performance.now()
+      if (now - calendarWheelLastEventAtRef.current > 180) resetWheelGesture()
+      calendarWheelLastEventAtRef.current = now
+
+      const pageHeight = Math.max(1, grid.clientHeight)
+      const delta = event.deltaMode === 1
+        ? event.deltaY * 16
+        : event.deltaMode === 2
+          ? event.deltaY * pageHeight
+          : event.deltaY
+      if (!Number.isFinite(delta) || delta === 0) return
+      const direction: -1 | 1 = delta > 0 ? 1 : -1
+      if (calendarWheelDirectionRef.current !== 0 && calendarWheelDirectionRef.current !== direction) {
+        calendarWheelDeltaRef.current = 0
+      }
+      calendarWheelDirectionRef.current = direction
+      calendarWheelDeltaRef.current += delta
+      if (Math.abs(calendarWheelDeltaRef.current) < 48) return
+
+      if (!animateCalendarViewport(direction)) return
+      event.preventDefault()
+      resetWheelGesture()
+    }
+
+    grid.addEventListener('wheel', handleCalendarWheel, { passive: false })
+    return () => {
+      grid.removeEventListener('wheel', handleCalendarWheel)
+      resetWheelGesture()
+    }
+  }, [animateCalendarViewport, loading, settings.calendarWeekScroll, templateCalendarDragging])
+
+  useEffect(() => {
     if (!railPanel || modalOpen || templateModalOpen || updatePromptOpen) return
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') closeRailPanel()
@@ -3542,7 +3787,10 @@ function MainView(props: SharedViewProps) {
       || (task.tagId ? selectedTagIds.has(task.tagId) : selectedTagIds.has(UNTAGGED_FILTER))
     return searchMatches && tagMatches
   }), [active, normalizedSearch, selectedTagIds])
-  const days = useMemo(() => calendarDays(month), [month])
+  const days = useMemo(
+    () => calendarDaysFromStart(fromDateKey(calendarViewStart), month),
+    [calendarViewStart, month],
+  )
   const calendarTasks = useMemo(() => {
     const firstDay = days[0]?.key
     const lastDay = days.at(-1)?.key
@@ -3566,10 +3814,12 @@ function MainView(props: SharedViewProps) {
     () => sortTasks(filtered.filter((task) => taskOccursOnDate(task, selectedDate))),
     [filtered, selectedDate],
   )
-  const selectedDailyNotes = useMemo(
-    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
-    [dailyNotes, selectedDate],
-  )
+  const {
+    nativeNotes: nativeDailyNotes,
+    visibleNotes: selectedDailyNotes,
+    toggleNote: toggleVisibleDailyNote,
+    togglePin: toggleVisibleDailyNotePin,
+  } = useVisibleDailyNotes(dailyNotes, selectedDate, onDailyNoteToggle, onDailyNotePinToggle)
   const monthTasks = useMemo(
     () => filtered.filter((task) => taskOverlapsRange(
       task,
@@ -3597,23 +3847,37 @@ function MainView(props: SharedViewProps) {
   }
 
   const chooseDate = (key: string) => {
+    if (calendarWeekMotionActiveRef.current) cancelCalendarWeekMotion()
     setSelectedDate(key)
     setSelectedRange({ startDate: key, endDate: key })
     const date = fromDateKey(key)
     if (date.getMonth() !== month.getMonth() || date.getFullYear() !== month.getFullYear()) {
-      setMonth(startOfMonth(date))
+      const nextMonth = startOfMonth(date)
+      setMonth(nextMonth)
+      const nextStart = calendarDays(nextMonth)[0].key
+      calendarViewStartRef.current = nextStart
+      setCalendarViewStart(nextStart)
     }
   }
 
   const goToday = () => {
+    cancelCalendarWeekMotion()
     setSelectedDate(today)
     setSelectedRange({ startDate: today, endDate: today })
-    setMonth(startOfMonth(new Date()))
+    const nextMonth = startOfMonth(new Date())
+    setMonth(nextMonth)
+    const nextStart = calendarDays(nextMonth)[0].key
+    calendarViewStartRef.current = nextStart
+    setCalendarViewStart(nextStart)
   }
 
   const jumpToMonth = (year: number, monthIndex: number) => {
+    cancelCalendarWeekMotion()
     const nextMonth = new Date(year, monthIndex, 1)
     setMonth(nextMonth)
+    const nextStart = calendarDays(nextMonth)[0].key
+    calendarViewStartRef.current = nextStart
+    setCalendarViewStart(nextStart)
     const selected = fromDateKey(selectedDate)
     const day = Math.min(selected.getDate(), new Date(year, monthIndex + 1, 0).getDate())
     const key = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
@@ -3708,7 +3972,6 @@ function MainView(props: SharedViewProps) {
     if (!saved) return false
     setSelectedDate(date)
     setSelectedRange({ startDate: date, endDate: date })
-    setMonth(startOfMonth(fromDateKey(date)))
     return true
   }
   const dropTemplateAtCalendarPoint = (
@@ -3751,13 +4014,12 @@ function MainView(props: SharedViewProps) {
     if (!moved) return
     setSelectedDate(targetDate)
     setSelectedRange({ startDate: moved.startDate, endDate: moved.dueDate })
-    setMonth(startOfMonth(fromDateKey(targetDate)))
   }
   const reorderNotesByDrop = (draggedId: string, targetId: string) => {
-    onDailyNoteReorder(droppedIds(selectedDailyNotes.map((note) => note.id), draggedId, targetId))
+    onDailyNoteReorder(droppedIds(nativeDailyNotes.map((note) => note.id), draggedId, targetId))
   }
   const moveNote = (id: string, direction: ReorderDirection) => {
-    onDailyNoteReorder(movedIds(selectedDailyNotes.map((note) => note.id), id, direction))
+    onDailyNoteReorder(movedIds(nativeDailyNotes.map((note) => note.id), id, direction))
   }
 
   const toggleRailPanel = (panel: Exclude<RailPanel, null>) => {
@@ -3842,7 +4104,7 @@ function MainView(props: SharedViewProps) {
           </IconButton>
           <IconButton
             id="rail-action-appearance"
-            label="화면 설정"
+            label="일반 설정"
             controls="rail-panel-appearance"
             expanded={railPanel === 'appearance'}
             railAction="appearance"
@@ -3850,7 +4112,7 @@ function MainView(props: SharedViewProps) {
             active={railPanel === 'appearance'}
             onClick={() => toggleRailPanel('appearance')}
           >
-            <Palette size={19} />
+            <Settings2 size={19} />
           </IconButton>
         </nav>
         <div className="rail-bottom" role="navigation" aria-label="앱 및 보관 메뉴">
@@ -3978,7 +4240,7 @@ function MainView(props: SharedViewProps) {
         />
       )}
       {railPanel === 'appearance' && (
-        <AppearancePanel
+        <GeneralSettingsPanel
           settings={settings}
           onSettingsChange={onSettingsChange}
           onClose={closeRailPanel}
@@ -4108,7 +4370,15 @@ function MainView(props: SharedViewProps) {
           </div>
           <div
             ref={calendarGridRef}
-            className="calendar-grid"
+            className={`calendar-grid${calendarWeekMotion
+              ? ` is-week-motion-${calendarWeekMotion.phase} is-week-motion-${calendarWeekMotion.direction > 0 ? 'down' : 'up'} is-week-motion-cycle-${calendarWeekMotion.sequence % 2 === 1 ? 'a' : 'b'}`
+              : ''}`}
+            data-view-start={calendarViewStart}
+            data-week-scroll-enabled={settings.calendarWeekScroll}
+            data-week-motion-phase={calendarWeekMotion?.phase}
+            data-week-motion-direction={calendarWeekMotion ? (calendarWeekMotion.direction > 0 ? 'down' : 'up') : undefined}
+            data-week-motion-sequence={calendarWeekMotion?.sequence}
+            aria-busy={calendarWeekMotion ? true : undefined}
             data-range-start={selectedRange.startDate}
             data-range-end={selectedRange.endDate}
             data-max-lanes={calendarMaxLanes}
@@ -4246,7 +4516,8 @@ function MainView(props: SharedViewProps) {
             onComposerOpenChange={setNoteComposerOpen}
             onCreate={onDailyNoteCreate}
             onUpdate={onDailyNoteUpdate}
-            onToggle={onDailyNoteToggle}
+            onToggle={toggleVisibleDailyNote}
+            onPinToggle={toggleVisibleDailyNotePin}
             onDelete={onDailyNoteDelete}
             onMove={moveNote}
             onDropNote={reorderNotesByDrop}
@@ -4327,7 +4598,11 @@ function MainView(props: SharedViewProps) {
           if (!saved) return false
           setSelectedDate(draft.startDate)
           setSelectedRange({ startDate: draft.startDate, endDate: draft.dueDate })
-          setMonth(startOfMonth(fromDateKey(draft.startDate)))
+          const nextMonth = startOfMonth(fromDateKey(draft.startDate))
+          setMonth(nextMonth)
+          const nextStart = calendarDays(nextMonth)[0].key
+          calendarViewStartRef.current = nextStart
+          setCalendarViewStart(nextStart)
           setModalOpen(false)
           setEditingTask(null)
           return true
@@ -4370,6 +4645,7 @@ function WidgetView(props: SharedViewProps) {
     onDailyNoteCreate,
     onDailyNoteUpdate,
     onDailyNoteToggle,
+    onDailyNotePinToggle,
     onDailyNoteDelete,
     onSettingsChange,
     onCreate,
@@ -4389,10 +4665,11 @@ function WidgetView(props: SharedViewProps) {
     () => sortTasks(active.filter((task) => taskOccursOnDate(task, selectedDate))),
     [active, selectedDate],
   )
-  const selectedDailyNotes = useMemo(
-    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
-    [dailyNotes, selectedDate],
-  )
+  const {
+    visibleNotes: selectedDailyNotes,
+    toggleNote: toggleVisibleDailyNote,
+    togglePin: toggleVisibleDailyNotePin,
+  } = useVisibleDailyNotes(dailyNotes, selectedDate, onDailyNoteToggle, onDailyNotePinToggle)
   const completedCount = selectedTasks.filter((task) => task.completed).length
   const week = useMemo(() => weekDaysAround(selectedDate), [selectedDate])
 
@@ -4577,7 +4854,8 @@ function WidgetView(props: SharedViewProps) {
               onComposerOpenChange={setNoteComposerOpen}
               onCreate={onDailyNoteCreate}
               onUpdate={onDailyNoteUpdate}
-              onToggle={onDailyNoteToggle}
+              onToggle={toggleVisibleDailyNote}
+              onPinToggle={toggleVisibleDailyNotePin}
               onDelete={onDailyNoteDelete}
               reorderable={false}
               showHeaderAdd
@@ -4763,6 +5041,7 @@ export default function App({ mode }: { mode: AppMode }) {
       noteDate,
       completed: false,
       completedAt: null,
+      pinned: false,
       position: nextPosition(storeRef.current.dailyNotes.filter((note) => note.noteDate === noteDate)),
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -4815,6 +5094,19 @@ export default function App({ mode }: { mode: AppMode }) {
     }))
   }, [commit])
 
+  const handleDailyNotePinToggle = useCallback((id: string) => {
+    const before = storeRef.current.dailyNotes.find((note) => note.id === id)
+    if (!before) return
+    const timestamp = new Date().toISOString()
+    if (!commit((current) => ({
+      ...current,
+      dailyNotes: current.dailyNotes.map((note) => note.id === id
+        ? { ...note, pinned: !note.pinned, updatedAt: timestamp }
+        : note),
+    }))) return
+    showToast(before.pinned ? '퀵 노트 고정을 해제했어요.' : '퀵 노트를 모든 날짜에 고정했어요.')
+  }, [commit, showToast, storeRef])
+
   const handleTaskDateMove = useCallback((id: string, targetStart: string) => {
     const before = storeRef.current.tasks.find((task) => task.id === id && !task.deletedAt)
     if (!before) return null
@@ -4847,6 +5139,7 @@ export default function App({ mode }: { mode: AppMode }) {
       ...(typeof changes.widgetSplit === 'number' ? { widgetSplit: clamp(changes.widgetSplit, 20, 80) } : {}),
       ...(typeof changes.fontScale === 'number' ? { fontScale: clamp(changes.fontScale, 0.85, 1.5) } : {}),
       ...(changes.themeColor ? { themeColor: normalizedHex(changes.themeColor, storeRef.current.settings.themeColor) } : {}),
+      ...(typeof changes.calendarWeekScroll === 'boolean' ? { calendarWeekScroll: changes.calendarWeekScroll } : {}),
     }
     return commit((current) => ({ ...current, settings: { ...current.settings, ...safe } }))
   }, [commit, storeRef])
@@ -5001,6 +5294,7 @@ export default function App({ mode }: { mode: AppMode }) {
     onDailyNoteCreate: handleDailyNoteCreate,
     onDailyNoteUpdate: handleDailyNoteUpdate,
     onDailyNoteToggle: handleDailyNoteToggle,
+    onDailyNotePinToggle: handleDailyNotePinToggle,
     onDailyNoteDelete: handleDailyNoteDelete,
     onTaskReorder: handleTaskReorder,
     onTaskDateMove: handleTaskDateMove,
