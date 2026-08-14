@@ -54,7 +54,8 @@ const MUTABLE_TASK_FIELDS = [
   'completed', 'completedAt', 'deletedAt', 'previousCompleted', 'updatedAt',
 ] as const
 const MUTABLE_DAILY_NOTE_FIELDS = [
-  'content', 'noteDate', 'completed', 'completedAt', 'pinned', 'position', 'updatedAt',
+  'content', 'noteDate', 'completed', 'completedAt', 'pinned', 'pinnedStartDate',
+  'pinnedEndDate', 'viewPositions', 'position', 'updatedAt',
 ] as const
 const MUTABLE_TAG_FIELDS = ['name', 'color', 'position', 'updatedAt'] as const
 const MUTABLE_TEMPLATE_FIELDS = [
@@ -217,13 +218,33 @@ function normalizeDailyNote(raw: unknown, fallbackTimestamp: string, fallbackPos
   if (!isRecord(raw) || typeof raw.id !== 'string' || typeof raw.content !== 'string' || !isDateKey(String(raw.noteDate))) return null
   const completed = raw.completed === true
   const createdAt = timestamp(raw.createdAt, fallbackTimestamp)
+  const noteDate = String(raw.noteDate)
+  const pinned = raw.pinned === true
+  const pinnedStartDate = isDateKey(String(raw.pinnedStartDate))
+    ? String(raw.pinnedStartDate)
+    : pinned ? noteDate : null
+  const pinnedEndCandidate = isDateKey(String(raw.pinnedEndDate)) ? String(raw.pinnedEndDate) : null
+  const pinnedEndDate = !pinned && pinnedStartDate && pinnedEndCandidate
+    ? pinnedEndCandidate
+    : null
+  const viewPositions: Record<string, number> = {}
+  if (isRecord(raw.viewPositions)) {
+    for (const [date, position] of Object.entries(raw.viewPositions).slice(0, 4096)) {
+      if (isDateKey(date) && Number.isInteger(position) && Number(position) >= 0 && Number(position) <= 10000) {
+        viewPositions[date] = Number(position)
+      }
+    }
+  }
   return {
     id: raw.id,
     content: raw.content,
-    noteDate: String(raw.noteDate),
+    noteDate,
     completed,
     completedAt: completed ? nullableTimestamp(raw.completedAt) : null,
-    pinned: raw.pinned === true,
+    pinned,
+    pinnedStartDate,
+    pinnedEndDate,
+    viewPositions,
     position: validPosition(raw.position, fallbackPosition),
     createdAt,
     updatedAt: timestamp(raw.updatedAt, createdAt),
@@ -581,7 +602,8 @@ function browserSeed(): DaylineStore {
     ],
     dailyNotes: [{
       id: makeId(), content: '떠오른 할 일을 여기에 바로 적어 보세요.', noteDate: todayKey(), completed: false,
-      completedAt: null, pinned: false, position: 0, createdAt: nowIso, updatedAt: nowIso,
+      completedAt: null, pinned: false, pinnedStartDate: null, pinnedEndDate: null,
+      viewPositions: {}, position: 0, createdAt: nowIso, updatedAt: nowIso,
     }],
     taskTags,
     settings: { ...DEFAULT_APP_SETTINGS },

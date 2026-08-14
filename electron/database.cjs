@@ -4,7 +4,7 @@ const { DatabaseSync } = require('node:sqlite')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 const STORE_VERSION = 1
 const UPDATE_CONSENT_META_KEY = 'pending_update_consent_v1'
 const INSTALLED_RELEASE_HISTORY_META_KEY = 'installed_release_history_v1'
@@ -74,13 +74,19 @@ const SUBTASK_COLUMN_BY_FIELD = {
   completedAt: 'completed_at',
   updatedAt: 'updated_at',
 }
-const DAILY_NOTE_PATCHABLE_FIELDS = ['content', 'noteDate', 'completed', 'completedAt', 'pinned', 'position', 'updatedAt']
+const DAILY_NOTE_PATCHABLE_FIELDS = [
+  'content', 'noteDate', 'completed', 'completedAt', 'pinned', 'pinnedStartDate',
+  'pinnedEndDate', 'viewPositions', 'position', 'updatedAt',
+]
 const DAILY_NOTE_COLUMN_BY_FIELD = {
   content: 'content',
   noteDate: 'note_date',
   completed: 'completed',
   completedAt: 'completed_at',
   pinned: 'pinned',
+  pinnedStartDate: 'pinned_start_date',
+  pinnedEndDate: 'pinned_end_date',
+  viewPositions: 'view_positions_json',
   position: 'position',
   updatedAt: 'updated_at',
 }
@@ -397,6 +403,10 @@ function createSeedStore(now = new Date()) {
         noteDate: dateOffset(0, now),
         completed: false,
         completedAt: null,
+        pinned: false,
+        pinnedStartDate: null,
+        pinnedEndDate: null,
+        viewPositions: {},
         position: 0,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -438,6 +448,25 @@ function normalizeTimestamp(value, fallback) {
 
 function validPosition(value, fallback = 0) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback
+}
+
+function sanitizeDailyNoteViewPositions(value) {
+  let source = value
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source)
+    } catch {
+      source = null
+    }
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return {}
+  const positions = {}
+  for (const [date, position] of Object.entries(source).slice(0, 4096)) {
+    if (isDateKey(date) && Number.isSafeInteger(position) && position >= 0 && position <= 10000) {
+      positions[date] = position
+    }
+  }
+  return positions
 }
 
 function normalizeHex(value, fallback = '#718096') {
@@ -601,6 +630,14 @@ function sanitizeDailyNote(note, now = new Date(), fallbackPosition = 0) {
   if (!isDateKey(note.noteDate)) return null
   const nowIso = now.toISOString()
   const completed = Boolean(note.completed)
+  const pinned = note.pinned === true
+  const pinnedStartDate = isDateKey(note.pinnedStartDate)
+    ? note.pinnedStartDate
+    : pinned ? note.noteDate : null
+  const pinnedEndCandidate = isDateKey(note.pinnedEndDate) ? note.pinnedEndDate : null
+  const pinnedEndDate = !pinned && pinnedStartDate && pinnedEndCandidate
+    ? pinnedEndCandidate
+    : null
   return {
     id: note.id,
     content: note.content.slice(0, 10000),
@@ -609,7 +646,10 @@ function sanitizeDailyNote(note, now = new Date(), fallbackPosition = 0) {
     completedAt: completed && isIsoTimestamp(note.completedAt)
       ? new Date(note.completedAt).toISOString()
       : null,
-    pinned: note.pinned === true,
+    pinned,
+    pinnedStartDate,
+    pinnedEndDate,
+    viewPositions: sanitizeDailyNoteViewPositions(note.viewPositions),
     position: validPosition(note.position, fallbackPosition),
     createdAt: normalizeTimestamp(note.createdAt, nowIso),
     updatedAt: normalizeTimestamp(note.updatedAt, nowIso),
@@ -661,6 +701,9 @@ function rowToDailyNote(row) {
     completed: row.completed === 1,
     completedAt: row.completed_at,
     pinned: row.pinned === 1,
+    pinnedStartDate: row.pinned_start_date,
+    pinnedEndDate: row.pinned_end_date,
+    viewPositions: sanitizeDailyNoteViewPositions(row.view_positions_json),
     position: row.position,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -718,7 +761,7 @@ function rowToTaskTemplate(row) {
 function sqliteValue(field, value) {
   if (field === 'completed' || field === 'pinned') return value ? 1 : 0
   if (field === 'previousCompleted') return value == null ? null : value ? 1 : 0
-  if (field === 'subTaskTitles') return JSON.stringify(value)
+  if (field === 'subTaskTitles' || field === 'viewPositions') return JSON.stringify(value)
   return value
 }
 
@@ -1121,6 +1164,38 @@ function createSchema(database, appliedAt) {
       database.exec('PRAGMA user_version = 5')
     })
   }
+
+  if (currentVersion < 6) {
+    inTransaction(database, () => {
+      if (!tableHasColumn(database, 'daily_notes', 'pinned_start_date')) {
+        database.exec(`
+          ALTER TABLE daily_notes ADD COLUMN pinned_start_date TEXT
+          CHECK (pinned_start_date IS NULL OR pinned_start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+        `)
+      }
+      if (!tableHasColumn(database, 'daily_notes', 'pinned_end_date')) {
+        database.exec(`
+          ALTER TABLE daily_notes ADD COLUMN pinned_end_date TEXT
+          CHECK (pinned_end_date IS NULL OR pinned_end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+        `)
+      }
+      if (!tableHasColumn(database, 'daily_notes', 'view_positions_json')) {
+        database.exec(`
+          ALTER TABLE daily_notes ADD COLUMN view_positions_json TEXT NOT NULL DEFAULT '{}'
+        `)
+      }
+      database.exec(`
+        UPDATE daily_notes
+        SET pinned_start_date = note_date
+        WHERE pinned = 1 AND pinned_start_date IS NULL
+      `)
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (6, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 6')
+    })
+  }
 }
 
 function insertSubTask(database, taskId, subTask, position) {
@@ -1180,8 +1255,9 @@ function insertTask(database, profileId, task) {
 function insertDailyNote(database, profileId, note) {
   return Number(database.prepare(`
     INSERT INTO daily_notes (
-      id, profile_id, content, note_date, completed, completed_at, pinned, position, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, profile_id, content, note_date, completed, completed_at, pinned,
+      pinned_start_date, pinned_end_date, view_positions_json, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     note.id,
@@ -1191,6 +1267,9 @@ function insertDailyNote(database, profileId, note) {
     note.completed ? 1 : 0,
     note.completedAt,
     note.pinned ? 1 : 0,
+    note.pinnedStartDate,
+    note.pinnedEndDate,
+    JSON.stringify(note.viewPositions),
     note.position,
     note.createdAt,
     note.updatedAt,

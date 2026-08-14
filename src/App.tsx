@@ -65,7 +65,12 @@ import {
   weekDaysAround,
 } from './domain/date'
 import { layoutCalendarTaskSegments, type CalendarTaskSegment } from './domain/calendarLayout'
-import { dailyNotesForDate, shouldLingerAfterForeignUnpin } from './domain/dailyNotes'
+import {
+  dailyNotesForDate,
+  reorderDailyNotesForDate,
+  toggleDailyNoteCompleted,
+  toggleDailyNotePin,
+} from './domain/dailyNotes'
 import { getCalendarDayTone, getKoreanHoliday } from './domain/koreanHolidays'
 import { parseReleaseNotes } from './domain/releaseNotes'
 import {
@@ -257,11 +262,14 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     target: 'quick-notes',
     eyebrow: '퀵 노트',
     title: '형식 없는 메모는 퀵 노트에 바로 적어요',
-    description: '제목이나 마감일이 필요 없는 생각은 선택한 날짜의 퀵 노트로 남기세요. 클릭해 수정하고 우클릭해 완료 상태를 바꿀 수 있어요.',
+    description: '제목이나 마감일이 필요 없는 생각은 선택한 날짜의 퀵 노트로 남기세요. 핀으로 모든 날짜에 고정하고, 다른 날짜에서도 손잡이를 끌어 일반 노트 사이에 배치할 수 있어요.',
     example: (
       <div className="help-example-note"><FileText size={15} /><div><strong>회의 전에 질문 목록 확인</strong><span>Ctrl + Enter로 저장</span></div></div>
     ),
-    tips: ['퀵 노트는 오른쪽 패널과 위젯에만 보이고 월간 캘린더에는 표시되지 않아요.'],
+    tips: [
+      '고정을 해제하면 시작일과 해제일에 기록이 남고, 실수로 같은 날 다시 고정하면 기존 시작일을 이어갑니다.',
+      '고정된 퀵 노트를 완료하면 해당 날짜에 기록을 남긴 채 자동으로 고정이 해제돼요.',
+    ],
   },
   {
     target: 'schedule-list',
@@ -339,7 +347,7 @@ const WIDGET_HELP_STEPS: HelpTourStep[] = [
     eyebrow: '위젯 둘러보기',
     title: '일정과 퀵 노트를 바탕화면 가까이에',
     description: '작은 위젯에서도 날짜 선택, 일정·세부 할 일, 퀵 노트를 함께 관리할 수 있어요.',
-    example: <div className="help-example-widget"><BrandMark compact /><div><strong>Dayline 0.2 위젯</strong><span>메인 캘린더와 실시간 동기화</span></div></div>,
+    example: <div className="help-example-widget"><BrandMark compact /><div><strong>Dayline 0.3.41 위젯</strong><span>메인 캘린더와 실시간 동기화</span></div></div>,
   },
   {
     target: 'widget-controls',
@@ -373,7 +381,7 @@ const WIDGET_HELP_STEPS: HelpTourStep[] = [
     target: 'widget-notes',
     eyebrow: '퀵 노트',
     title: '작은 메모도 놓치지 마세요',
-    description: '+를 눌러 형식 없이 기록하고, 클릭해 수정하거나 우클릭해 완료 표시할 수 있어요.',
+    description: '+를 눌러 형식 없이 기록하고, 핀으로 모든 날짜에 고정하거나 완료 처리해 자동으로 고정을 해제할 수 있어요.',
     example: <div className="help-example-note"><FileText size={15} /><div><strong>퇴근 전에 전화하기</strong><span>선택 날짜에 바로 저장</span></div></div>,
     tips: ['시간·기간·태그가 필요하면 일정으로 추가하세요.'],
   },
@@ -489,48 +497,23 @@ function droppedIds(ids: string[], draggedId: string, targetId: string) {
 function useVisibleDailyNotes(
   dailyNotes: DailyNote[],
   selectedDate: string,
-  onToggle: (id: string) => void,
-  onPinToggle: (id: string) => void,
+  onToggle: (id: string, selectedDate: string) => void,
+  onPinToggle: (id: string, selectedDate: string) => void,
 ) {
-  const [lingerDates, setLingerDates] = useState<Map<string, string>>(() => new Map())
-  const previousSelectedDateRef = useRef(selectedDate)
-
-  useEffect(() => {
-    if (previousSelectedDateRef.current === selectedDate) return
-    previousSelectedDateRef.current = selectedDate
-    setLingerDates((current) => current.size === 0 ? current : new Map())
-  }, [selectedDate])
-
-  const nativeNotes = useMemo(
-    () => sortedPositioned(dailyNotes.filter((note) => note.noteDate === selectedDate)),
+  const visibleNotes = useMemo(
+    () => dailyNotesForDate(dailyNotes, selectedDate),
     [dailyNotes, selectedDate],
   )
-  const visibleNotes = useMemo(
-    () => dailyNotesForDate(dailyNotes, selectedDate, lingerDates),
-    [dailyNotes, lingerDates, selectedDate],
-  )
-
-  const retainBeforeForeignUnpin = useCallback((id: string) => {
-    const note = dailyNotes.find((value) => value.id === id)
-    if (!note || !shouldLingerAfterForeignUnpin(note, selectedDate)) return
-    setLingerDates((current) => {
-      if (current.get(id) === selectedDate) return current
-      const next = new Map(current)
-      next.set(id, selectedDate)
-      return next
-    })
-  }, [dailyNotes, selectedDate])
 
   const toggleNote = useCallback((id: string) => {
-    onToggle(id)
-  }, [onToggle])
+    onToggle(id, selectedDate)
+  }, [onToggle, selectedDate])
 
   const togglePin = useCallback((id: string) => {
-    retainBeforeForeignUnpin(id)
-    onPinToggle(id)
-  }, [onPinToggle, retainBeforeForeignUnpin])
+    onPinToggle(id, selectedDate)
+  }, [onPinToggle, selectedDate])
 
-  return { nativeNotes, visibleNotes, toggleNote, togglePin }
+  return { visibleNotes, toggleNote, togglePin }
 }
 
 function parseTaskDateDragPayload(raw: string): TaskDateDragPayload | null {
@@ -1314,13 +1297,23 @@ function DailyNotesSection({
           </button>
         ) : (
           notes.map((note) => {
-            const canReorder = reorderable && note.noteDate === selectedDate
+            const canReorder = reorderable
+            const pinStartDate = note.pinnedStartDate ?? note.noteDate
+            const pinTitle = note.pinned ? `${formatCompactDate(pinStartDate)}에 고정됨` : '고정하기'
+            const pinHistory = !note.pinned
+              && note.pinnedStartDate
+              && note.pinnedEndDate
+              && note.pinnedStartDate !== note.pinnedEndDate
+              ? `${formatCompactDate(note.pinnedStartDate)} ~ ${formatCompactDate(note.pinnedEndDate)} 고정`
+              : null
             return (
             <article
               key={note.id}
               data-daily-note-id={note.id}
               data-note-date={note.noteDate}
               data-note-pinned={note.pinned || undefined}
+              data-note-pin-start-date={note.pinnedStartDate || undefined}
+              data-note-pin-end-date={note.pinnedEndDate || undefined}
               className={`daily-note-item ${note.completed ? 'is-completed' : ''} ${note.pinned ? 'is-pinned' : ''} ${canReorder ? 'has-reorder' : ''}`}
               onDragOver={(event) => {
                 if (!canReorder || !event.dataTransfer.types.includes('application/x-dayline-daily-note')) return
@@ -1349,19 +1342,22 @@ function DailyNotesSection({
               >
                 {note.completed && <Check size={11} strokeWidth={3} />}
               </button>
-              <button
-                type="button"
-                className="note-content"
-                onClick={() => editNote(note)}
-                onKeyDown={(event) => {
-                  if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
-                  event.preventDefault()
-                  onToggle(note.id)
-                }}
-                title="클릭하여 수정 · 우클릭하여 완료 상태 전환"
-              >
-                {note.content}
-              </button>
+              <div className="note-copy">
+                <button
+                  type="button"
+                  className="note-content"
+                  onClick={() => editNote(note)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+                    event.preventDefault()
+                    onToggle(note.id)
+                  }}
+                  title="클릭하여 수정 · 우클릭하여 완료 상태 전환"
+                >
+                  {note.content}
+                </button>
+                {pinHistory && <span className="note-pin-history" data-qa="quick-note-pin-history">{pinHistory}</span>}
+              </div>
               <IconButton label="퀵 노트 삭제" className="note-delete" onClick={() => onDelete(note.id)}>
                 <Trash2 size={13} />
               </IconButton>
@@ -1372,7 +1368,7 @@ function DailyNotesSection({
                 data-note-id={note.id}
                 aria-label={`${note.pinned ? '퀵 노트 고정 해제' : '퀵 노트 고정'}: ${note.content}`}
                 aria-pressed={note.pinned}
-                title={note.pinned ? '모든 날짜에서 표시 중 · 클릭하여 고정 해제' : '모든 날짜에서 표시'}
+                title={pinTitle}
                 onClick={() => onPinToggle(note.id)}
               >
                 <Pin size={13} fill={note.pinned ? 'currentColor' : 'none'} />
@@ -3372,12 +3368,12 @@ interface SharedViewProps {
   onSubTaskToggle: (taskId: string, subTaskId: string) => void
   onDailyNoteCreate: (noteDate: string, content: string) => boolean
   onDailyNoteUpdate: (id: string, content: string) => boolean
-  onDailyNoteToggle: (id: string) => void
-  onDailyNotePinToggle: (id: string) => void
+  onDailyNoteToggle: (id: string, selectedDate: string) => void
+  onDailyNotePinToggle: (id: string, selectedDate: string) => void
   onDailyNoteDelete: (id: string) => void
   onTaskReorder: (orderedIds: string[]) => boolean
   onTaskDateMove: (id: string, targetStart: string) => Task | null
-  onDailyNoteReorder: (orderedIds: string[]) => boolean
+  onDailyNoteReorder: (orderedIds: string[], selectedDate: string) => boolean
   onSettingsChange: (changes: Partial<AppSettings>) => boolean
   onTagCreate: (name: string, color: string) => boolean
   onTagUpdate: (id: string, changes: Partial<Pick<TaskTag, 'name' | 'color'>>) => boolean
@@ -3815,7 +3811,6 @@ function MainView(props: SharedViewProps) {
     [filtered, selectedDate],
   )
   const {
-    nativeNotes: nativeDailyNotes,
     visibleNotes: selectedDailyNotes,
     toggleNote: toggleVisibleDailyNote,
     togglePin: toggleVisibleDailyNotePin,
@@ -4016,10 +4011,13 @@ function MainView(props: SharedViewProps) {
     setSelectedRange({ startDate: moved.startDate, endDate: moved.dueDate })
   }
   const reorderNotesByDrop = (draggedId: string, targetId: string) => {
-    onDailyNoteReorder(droppedIds(nativeDailyNotes.map((note) => note.id), draggedId, targetId))
+    onDailyNoteReorder(
+      droppedIds(selectedDailyNotes.map((note) => note.id), draggedId, targetId),
+      selectedDate,
+    )
   }
   const moveNote = (id: string, direction: ReorderDirection) => {
-    onDailyNoteReorder(movedIds(nativeDailyNotes.map((note) => note.id), id, direction))
+    onDailyNoteReorder(movedIds(selectedDailyNotes.map((note) => note.id), id, direction), selectedDate)
   }
 
   const toggleRailPanel = (panel: Exclude<RailPanel, null>) => {
@@ -5042,6 +5040,9 @@ export default function App({ mode }: { mode: AppMode }) {
       completed: false,
       completedAt: null,
       pinned: false,
+      pinnedStartDate: null,
+      pinnedEndDate: null,
+      viewPositions: {},
       position: nextPosition(storeRef.current.dailyNotes.filter((note) => note.noteDate === noteDate)),
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -5063,20 +5064,17 @@ export default function App({ mode }: { mode: AppMode }) {
     return saved
   }, [commit, showToast])
 
-  const handleDailyNoteToggle = useCallback((id: string) => {
-    const timestamp = new Date().toISOString()
-    commit((current) => ({
+  const handleDailyNoteToggle = useCallback((id: string, selectedDate: string) => {
+    const before = storeRef.current.dailyNotes.find((note) => note.id === id)
+    if (!before) return
+    if (!commit((current) => ({
       ...current,
-      dailyNotes: current.dailyNotes.map((note) => note.id === id
-        ? {
-            ...note,
-            completed: !note.completed,
-            completedAt: note.completed ? null : timestamp,
-            updatedAt: timestamp,
-          }
-        : note),
-    }))
-  }, [commit])
+      dailyNotes: toggleDailyNoteCompleted(current.dailyNotes, id, selectedDate),
+    }))) return
+    if (!before.completed && before.pinned) {
+      showToast('퀵 노트를 비활성화하고 고정을 해제했어요.')
+    }
+  }, [commit, showToast, storeRef])
 
   const handleDailyNoteDelete = useCallback((id: string) => {
     if (!commit((current) => ({
@@ -5094,15 +5092,16 @@ export default function App({ mode }: { mode: AppMode }) {
     }))
   }, [commit])
 
-  const handleDailyNotePinToggle = useCallback((id: string) => {
+  const handleDailyNotePinToggle = useCallback((id: string, selectedDate: string) => {
     const before = storeRef.current.dailyNotes.find((note) => note.id === id)
     if (!before) return
-    const timestamp = new Date().toISOString()
+    if (before.completed) {
+      showToast('비활성 퀵 노트는 다시 활성화한 뒤 고정할 수 있어요.')
+      return
+    }
     if (!commit((current) => ({
       ...current,
-      dailyNotes: current.dailyNotes.map((note) => note.id === id
-        ? { ...note, pinned: !note.pinned, updatedAt: timestamp }
-        : note),
+      dailyNotes: toggleDailyNotePin(current.dailyNotes, id, selectedDate),
     }))) return
     showToast(before.pinned ? '퀵 노트 고정을 해제했어요.' : '퀵 노트를 모든 날짜에 고정했어요.')
   }, [commit, showToast, storeRef])
@@ -5125,11 +5124,11 @@ export default function App({ mode }: { mode: AppMode }) {
     return moved
   }, [commit, showToast, storeRef])
 
-  const handleDailyNoteReorder = useCallback((orderedIds: string[]) => {
+  const handleDailyNoteReorder = useCallback((orderedIds: string[], selectedDate: string) => {
     if (orderedIds.length < 2) return true
     return commit((current) => ({
       ...current,
-      dailyNotes: reorderPositioned(current.dailyNotes, orderedIds),
+      dailyNotes: reorderDailyNotesForDate(current.dailyNotes, orderedIds, selectedDate),
     }))
   }, [commit])
 

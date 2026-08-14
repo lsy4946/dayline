@@ -1117,6 +1117,7 @@ button:disabled {
 }
 
 .note-content {
+  width: 100%;
   padding: 1px 0;
   overflow: hidden;
   border: 0;
@@ -1129,6 +1130,20 @@ button:disabled {
   text-align: left;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.note-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.note-pin-history {
+  color: #7e8d84;
+  font-size: var(--font-8, 8px);
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .daily-note-item.is-completed {

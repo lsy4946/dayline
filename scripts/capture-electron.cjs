@@ -2834,6 +2834,16 @@ app.whenReady().then(async () => {
     { domOrder: true, deleteLeft: true },
     'Quick-note delete action must appear immediately before the pin action',
   )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `document.querySelector(
+        '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+      )?.getAttribute('title')`,
+    ),
+    '고정하기',
+    'An inactive quick note uses the concise pin hover label',
+  )
   await runIn(
     mainWindow,
     `document.querySelector(
@@ -2844,11 +2854,20 @@ app.whenReady().then(async () => {
     mainWindow,
     `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
       && JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
-        .filter((note) => note.id === ${JSON.stringify(quickNoteId)} && note.pinned).length === 1
+        .filter((note) => note.id === ${JSON.stringify(quickNoteId)}
+          && note.pinned
+          && note.pinnedStartDate === ${JSON.stringify(today)}
+          && note.pinnedEndDate === null).length === 1
       && document.querySelector(
         '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'quick-note pin persists once and leads its source-date list',
+      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
+      && document.querySelector(
+        '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+      )?.getAttribute('title')?.endsWith('에 고정됨')
+      && !document.querySelector(
+        '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+      )?.getAttribute('title')?.includes('모든 날짜')`,
+    'pin persists its start date, leads by default, and exposes the start date on hover',
   )
   await reloadRenderer(mainWindow)
   await waitForRenderer(
@@ -2860,6 +2879,90 @@ app.whenReady().then(async () => {
         ?.getAttribute('aria-pressed') === 'true'`,
     'source-date pin order persists after renderer restart',
   )
+  const foreignPinnedDate = addDaysKey(today, 1)
+  const nextForeignPinnedDate = addDaysKey(today, 2)
+  const foreignNativeNoteId = 'qa-note-foreign-native'
+  assert.equal(
+    await runIn(mainWindow, `(() => {
+      const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1'))
+      const source = store.dailyNotes.find((note) => note.id === ${JSON.stringify(quickNoteId)})
+      if (!source) return false
+      store.dailyNotes = store.dailyNotes
+        .filter((note) => note.id !== ${JSON.stringify(foreignNativeNoteId)})
+        .concat({
+          ...source,
+          id: ${JSON.stringify(foreignNativeNoteId)},
+          content: 'QA foreign-date native quick note',
+          noteDate: ${JSON.stringify(foreignPinnedDate)},
+          completed: false,
+          completedAt: null,
+          pinned: false,
+          pinnedStartDate: null,
+          pinnedEndDate: null,
+          viewPositions: {},
+          position: 999,
+        })
+      localStorage.setItem('dayline-browser-store-v1', JSON.stringify(store))
+      return true
+    })()`),
+    true,
+    'Foreign-date reorder QA requires one native quick note',
+  )
+  await reloadRenderer(mainWindow)
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelectorAll('[data-daily-note-id="${quickNoteId}"]').length === 1
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] .reorder-handle')
+      && document.querySelector('[data-daily-note-id="${foreignNativeNoteId}"] .reorder-handle')
+      && [...document.querySelectorAll(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )].findIndex((row) => row.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)})
+        < [...document.querySelectorAll(
+          '[data-qa="quick-note-section"] [data-daily-note-id]',
+        )].findIndex((row) => row.dataset.dailyNoteId === ${JSON.stringify(foreignNativeNoteId)})
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]')
+        ?.getAttribute('aria-pressed') === 'true'`,
+    'a foreign pin leads by default and exposes the same reorder handle as native notes',
+  )
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.dragAndDrop(
+        '[data-reorder-kind="daily-note"][data-reorder-id="${quickNoteId}"]',
+        '[data-daily-note-id="${foreignNativeNoteId}"]',
+      )`,
+    ),
+    true,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `(() => {
+      const ids = [...document.querySelectorAll(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )].map((row) => row.dataset.dailyNoteId)
+      const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1'))
+      const pin = store.dailyNotes.find((note) => note.id === ${JSON.stringify(quickNoteId)})
+      const native = store.dailyNotes.find((note) => note.id === ${JSON.stringify(foreignNativeNoteId)})
+      return ids.indexOf(${JSON.stringify(foreignNativeNoteId)})
+          < ids.indexOf(${JSON.stringify(quickNoteId)})
+        && native.viewPositions[${JSON.stringify(foreignPinnedDate)}]
+          < pin.viewPositions[${JSON.stringify(foreignPinnedDate)}]
+    })()`,
+    'a foreign pin can be placed below an unpinned note and stores the per-date order',
+  )
+  await reloadRenderer(mainWindow)
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
+  await waitForRenderer(
+    mainWindow,
+    `[...document.querySelectorAll(
+      '[data-qa="quick-note-section"] [data-daily-note-id]',
+    )].findIndex((row) => row.dataset.dailyNoteId === ${JSON.stringify(foreignNativeNoteId)})
+      < [...document.querySelectorAll(
+        '[data-qa="quick-note-section"] [data-daily-note-id]',
+      )].findIndex((row) => row.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)})`,
+    'the mixed foreign-date order persists after renderer restart',
+  )
   await runIn(
     mainWindow,
     `document.querySelector(
@@ -2870,172 +2973,70 @@ app.whenReady().then(async () => {
     mainWindow,
     `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
       && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId !== ${JSON.stringify(quickNoteId)}`,
-    'unpinning on the source date restores the note to its saved native position',
-  )
-  await runIn(
-    mainWindow,
-    `document.querySelector(
-      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
-    )?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector(
-      '[data-qa="quick-note-section"] [data-daily-note-id]',
-    )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'repinning on the source date immediately restores the fixed top position',
-  )
-  const foreignPinnedDate = addDaysKey(today, 1)
-  const nextForeignPinnedDate = addDaysKey(today, 2)
-  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelectorAll('[data-daily-note-id="${quickNoteId}"]').length === 1
-      && !document.querySelector('[data-daily-note-id="${quickNoteId}"] .reorder-handle')
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinStartDate
+        === ${JSON.stringify(today)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinEndDate
+        === ${JSON.stringify(foreignPinnedDate)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin-history"]')
+        ?.textContent.includes('~')
       && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]')
-        ?.getAttribute('aria-pressed') === 'true'`,
-    'foreign date renders one pinned note without a reorder handle',
-  )
-  await runIn(
-    mainWindow,
-    `document.querySelector(
-      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
-    )?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'`,
-    'foreign unpin lingers on the current selected date',
+        ?.getAttribute('title') === '고정하기'`,
+    'foreign unpin persists the release endpoint and visible interval history',
   )
   await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
   assert.equal(
     await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
     true,
-    'reselecting the same date does not dismiss a lingering note',
+    'reselecting the same date preserves the persisted release endpoint',
+  )
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinStartDate
+        === ${JSON.stringify(today)}
+      && !document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinEndDate`,
+    'same-day repin resumes the original start date and clears the provisional endpoint',
   )
   await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${nextForeignPinnedDate}"]')?.click()`)
+  await runIn(
+    mainWindow,
+    `document.querySelector(
+      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
+    )?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinStartDate
+        === ${JSON.stringify(today)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinEndDate
+        === ${JSON.stringify(nextForeignPinnedDate)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin-history"]')`,
+    'later release extends the resumed interval from the original start through the new endpoint',
+  )
+  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')`,
-    'lingering note disappears on the next different date',
+    'the discarded intermediate endpoint no longer renders after the interval is resumed',
   )
   await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${today}"]')?.click()`)
   await waitForRenderer(
     mainWindow,
     `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`,
-    'native note remains visible on its source date',
-  )
-  await runIn(
-    mainWindow,
-    `document.querySelector(
-      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
-    )?.click()`,
-  )
-  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
-  await runIn(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-check')?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'completed foreign pin remains globally visible and fixed at the top',
+    'the original start/source date retains the released quick-note record',
   )
   await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${nextForeignPinnedDate}"]')?.click()`)
   await waitForRenderer(
     mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
-      && !document.querySelector('[data-daily-note-id="${quickNoteId}"] .reorder-handle')`,
-    'completed pin remains globally visible and fixed after selecting a different date',
-  )
-  await reloadRenderer(mainWindow)
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}
-      && JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
-        .filter((note) => note.id === ${JSON.stringify(quickNoteId)}
-          && note.pinned && note.completed).length === 1`,
-    'completed pin persists once and remains globally fixed after renderer restart',
-  )
-  const reloadedCompletedPinDate = addDaysKey(today, 3)
-  await runIn(
-    mainWindow,
-    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'reloaded completed pin remains visible and fixed on another selected date',
-  )
-  const completedPinnedStoreBeforeDelete = await runIn(
-    mainWindow,
-    `localStorage.getItem('dayline-browser-store-v1')`,
-  )
-  assert.ok(completedPinnedStoreBeforeDelete, 'Completed-pin deletion QA requires a restorable store')
-  await runIn(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-delete')?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')
-      && !JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
-        .some((note) => note.id === ${JSON.stringify(quickNoteId)})`,
-    'deleting a completed pin removes its single stored row and global rendering',
-  )
-  await reloadRenderer(mainWindow)
-  assert.equal(
-    await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
-    false,
-    'deleted completed pin remains absent after renderer restart',
-  )
-  await runIn(
-    mainWindow,
-    `localStorage.setItem(
-      'dayline-browser-store-v1',
-      ${JSON.stringify(completedPinnedStoreBeforeDelete)},
-    )`,
-  )
-  await reloadRenderer(mainWindow)
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'restored completed pin after isolated deletion acceptance',
-  )
-  await runIn(
-    mainWindow,
-    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'restored completed pin remains globally fixed before unpin acceptance',
+    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`,
+    'the final release date retains the released quick-note record',
   )
   await runIn(
     mainWindow,
@@ -3045,42 +3046,13 @@ app.whenReady().then(async () => {
   )
   await waitForRenderer(
     mainWindow,
-    `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')`,
-    'unpinning a completed foreign pin lingers on the current date',
+    `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinStartDate
+        === ${JSON.stringify(today)}`,
+    'repinning on the final endpoint keeps the original interval start',
   )
-  await runIn(
-    mainWindow,
-    `document.querySelector('.calendar-cell[data-date="${reloadedCompletedPinDate}"]')?.click()`,
-  )
-  assert.equal(
-    await runIn(mainWindow, `Boolean(document.querySelector('[data-daily-note-id="${quickNoteId}"]'))`),
-    true,
-    'reselecting the same date does not dismiss a completed unpinned linger',
-  )
-  await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${foreignPinnedDate}"]')?.click()`)
-  await waitForRenderer(
-    mainWindow,
-    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')`,
-    'completed unpinned linger disappears on the next different date',
-  )
+  await reloadRenderer(mainWindow)
   await runIn(mainWindow, `document.querySelector('.calendar-cell[data-date="${today}"]')?.click()`)
-  await runIn(
-    mainWindow,
-    `document.querySelector(
-      '[data-daily-note-id="${quickNoteId}"] [data-qa="quick-note-pin"]',
-    )?.click()`,
-  )
-  await runIn(
-    mainWindow,
-    `document.querySelector('[data-daily-note-id="${quickNoteId}"] .note-check')?.click()`,
-  )
-  await waitForRenderer(
-    mainWindow,
-    `!document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')`,
-    'native note reactivation restores its active pin',
-  )
   await reloadRenderer(widgetWindow)
   const widgetForeignPinnedDate = await runIn(widgetWindow, `(() => {
     const button = [...document.querySelectorAll('.widget-week [data-date]')]
@@ -3148,11 +3120,15 @@ app.whenReady().then(async () => {
   await waitForRenderer(
     mainWindow,
     `document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.classList.contains('is-completed')
-      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned === 'true'
-      && document.querySelector(
-        '[data-qa="quick-note-section"] [data-daily-note-id]',
-      )?.dataset.dailyNoteId === ${JSON.stringify(quickNoteId)}`,
-    'completed source-date pin remains visible in the fixed top group',
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinned !== 'true'
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinStartDate
+        === ${JSON.stringify(today)}
+      && document.querySelector('[data-daily-note-id="${quickNoteId}"]')?.dataset.notePinEndDate
+        === ${JSON.stringify(today)}
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1')).dailyNotes
+        .some((note) => note.id === ${JSON.stringify(quickNoteId)}
+          && note.completed && !note.pinned && note.pinnedEndDate === ${JSON.stringify(today)})`,
+    'completing a pinned note automatically releases it and keeps the current-date record',
   )
 
   qaStage = 'reorder-and-persist'

@@ -35,6 +35,9 @@ export interface DailyNote {
   completed: boolean
   completedAt: string | null
   pinned: boolean
+  pinnedStartDate: string | null
+  pinnedEndDate: string | null
+  viewPositions: Record<string, number>
   position: number
   createdAt: string
   updatedAt: string
@@ -113,7 +116,16 @@ export type SubTaskPatch = Partial<Pick<
 
 export type DailyNotePatch = Partial<Pick<
   DailyNote,
-  'content' | 'noteDate' | 'completed' | 'completedAt' | 'pinned' | 'position' | 'updatedAt'
+  | 'content'
+  | 'noteDate'
+  | 'completed'
+  | 'completedAt'
+  | 'pinned'
+  | 'pinnedStartDate'
+  | 'pinnedEndDate'
+  | 'viewPositions'
+  | 'position'
+  | 'updatedAt'
 >>
 
 export type TaskTagPatch = Partial<Pick<

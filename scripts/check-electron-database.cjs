@@ -254,7 +254,7 @@ app.whenReady().then(() => {
     assert.equal(store.taskTags.some((value) => value.id === 'runtime-custom-tag'), true)
     assert.deepEqual(store.taskTemplates.map((value) => value.id), ['runtime-template'])
     assert.equal(store.settings.fontScale, 1.1)
-    assert.equal(database.readDiagnostics().schemaVersion, 5)
+    assert.equal(database.readDiagnostics().schemaVersion, 6)
 
     store = database.applyStoreMutations([
       {
@@ -376,7 +376,7 @@ app.whenReady().then(() => {
     })
     const upgradedStore = database.readStore()
     const upgradedDiagnostics = database.readDiagnostics()
-    assert.equal(upgradedDiagnostics.schemaVersion, 5)
+    assert.equal(upgradedDiagnostics.schemaVersion, 6)
     assert.deepEqual(upgradedStore.tasks.map((value) => value.id), [
       'runtime-v1-task',
       'runtime-v2-task-later',
@@ -417,7 +417,7 @@ app.whenReady().then(() => {
     assert.ok(tableNames.includes('task_tags'))
     assert.ok(tableNames.includes('task_templates'))
     assert.ok(tableNames.includes('app_settings'))
-    assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 5)
+    assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 6)
     assert.equal(inspected.prepare('PRAGMA quick_check').get().quick_check, 'ok')
     assert.deepEqual(inspected.prepare('PRAGMA foreign_key_check').all(), [])
     const indexNames = inspected.prepare(`
@@ -454,6 +454,10 @@ app.whenReady().then(() => {
       inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5`).get().count,
       1,
     )
+    assert.equal(
+      inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 6`).get().count,
+      1,
+    )
     inspected.close()
 
     database = createDaylineDatabase({
@@ -461,7 +465,7 @@ app.whenReady().then(() => {
       legacyJsonPath: path.join(v1Directory, 'missing-legacy.json'),
       now: () => new Date(FIXED_NOW),
     })
-    assert.equal(database.readDiagnostics().schemaVersion, 5)
+    assert.equal(database.readDiagnostics().schemaVersion, 6)
     assert.equal(database.readStore().taskTags.length, 9)
     assert.deepEqual(database.readStore().tasks.map((value) => value.position), [0, 1])
     database.close()
