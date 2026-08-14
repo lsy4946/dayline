@@ -385,8 +385,11 @@ function createUpdaterController({
   currentVersion,
   support,
   broadcast = () => {},
+  beginUpdate = () => {},
   beforeInstall = async () => {},
+  installUpdate = (isSilent, forceRunAfter) => adapter.quitAndInstall(isSilent, forceRunAfter),
   afterInstallFailure = async () => {},
+  cancelUpdate = async () => {},
   initialInstalledReleaseHistory = null,
   recordUpdateConsent = () => {},
   fetchReleaseHistory = null,
@@ -411,6 +414,7 @@ function createUpdaterController({
     installedReleaseHistory: normalizeInstalledReleaseHistory(initialInstalledReleaseHistory, currentVersion),
     progress: null,
     error: null,
+    sessionActive: false,
     unsupportedReason: support.reason,
     canCheck: support.supported,
     canDownload: false,
@@ -436,12 +440,18 @@ function createUpdaterController({
 
   function publish(patch) {
     const nextStatus = patch.status || state.status
+    const nextSessionActive = Object.prototype.hasOwnProperty.call(patch, 'sessionActive')
+      ? patch.sessionActive === true
+      : state.sessionActive
     if (!UPDATE_STATUSES.has(nextStatus)) throw new Error('Invalid updater status')
     state = {
       ...state,
       ...patch,
       status: nextStatus,
-      canCheck: support.supported && !['checking', 'downloading', 'downloaded', 'installing'].includes(nextStatus),
+      sessionActive: nextSessionActive,
+      canCheck: support.supported
+        && !nextSessionActive
+        && !['checking', 'downloading', 'downloaded', 'installing'].includes(nextStatus),
       canDownload: support.supported && nextStatus === 'available',
       canInstall: support.supported && nextStatus === 'downloaded',
     }
@@ -532,6 +542,7 @@ function createUpdaterController({
   adapter.on('update-downloaded', (info) => {
     if (!support.supported) return
     if (state.status === 'installing') return
+    if (state.sessionActive && !explicitDownloadConsent) return
     const downloadedVersion = releaseVersionKey(info?.version)
     const availableVersion = releaseVersionKey(state.availableVersion)
     if (availableVersion && (
@@ -584,7 +595,7 @@ function createUpdaterController({
   })
 
   async function check() {
-    if (!support.supported || ['downloading', 'downloaded', 'installing'].includes(state.status)) return getState()
+    if (!support.supported || state.sessionActive || ['downloading', 'downloaded', 'installing'].includes(state.status)) return getState()
     if (checkPromise) return checkPromise
     if (downloadPromise) return getState()
 
@@ -646,8 +657,20 @@ function createUpdaterController({
     }
     const attempt = ++downloadAttemptSequence
     explicitDownloadConsent = consentedVersion ? { attempt, version: consentedVersion } : null
-    publish({ status: 'downloading', progress: 0, error: null })
-    downloadPromise = Promise.resolve()
+    let updateUiReady
+    try {
+      updateUiReady = beginUpdate()
+    } catch (error) {
+      explicitDownloadConsent = null
+      return publish({
+        status: 'available',
+        progress: null,
+        error: sanitizeUpdaterError(error, 'download'),
+        sessionActive: false,
+      })
+    }
+    publish({ status: 'downloading', progress: 0, error: null, sessionActive: true })
+    downloadPromise = Promise.resolve(updateUiReady)
       .then(() => adapter.downloadUpdate())
       .then(() => installPromise || getState())
       .catch((error) => {
@@ -679,22 +702,52 @@ function createUpdaterController({
       })
     }
 
+    let updateUiReady
+    try {
+      updateUiReady = state.sessionActive ? undefined : beginUpdate()
+    } catch (error) {
+      return publish({
+        status: 'downloaded',
+        progress: 100,
+        error: sanitizeUpdaterError(error, 'install'),
+        sessionActive: false,
+      })
+    }
+
     quitAndInstallTriggered = true
-    publish({ status: 'installing', progress: 100, error: null })
-    installPromise = Promise.resolve()
+    publish({ status: 'installing', progress: 100, error: null, sessionActive: true })
+    installPromise = Promise.resolve(updateUiReady)
       .then(() => beforeInstall())
       .then(() => {
         if (installRecoveryPromise || state.status !== 'installing') {
           return installRecoveryPromise || getState()
         }
-        adapter.quitAndInstall(true, true)
-        return installRecoveryPromise || getState()
+        return Promise.resolve(installUpdate(false, true, {
+          currentVersion: state.currentVersion,
+          availableVersion: state.availableVersion,
+        })).then(() => installRecoveryPromise || getState())
       })
       .catch(recoverFailedInstall)
     return installPromise
   }
 
-  return { getState, check, startupCheck, download, install }
+  async function cancel() {
+    if (!support.supported || !state.sessionActive) return getState()
+    if (state.status === 'downloading' || state.status === 'installing') return getState()
+    await cancelUpdate()
+    explicitDownloadConsent = null
+    quitAndInstallTriggered = false
+    installPromise = null
+    installRecoveryPromise = null
+    return publish({
+      status: state.availableVersion ? 'available' : 'idle',
+      progress: null,
+      error: null,
+      sessionActive: false,
+    })
+  }
+
+  return { getState, check, startupCheck, download, install, cancel }
 }
 
 function configureAutoUpdater(adapter) {

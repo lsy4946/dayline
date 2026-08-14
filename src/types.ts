@@ -207,6 +207,7 @@ export interface UpdateState {
   installedReleaseHistory: InstalledReleaseHistory
   progress: number | null
   error: string | null
+  sessionActive: boolean
   unsupportedReason: UpdateUnsupportedReason | null
   canCheck: boolean
   canDownload: boolean
@@ -218,6 +219,8 @@ export interface DaylineUpdateApi {
   check: () => Promise<UpdateState>
   download: () => Promise<UpdateState>
   install: () => Promise<UpdateState>
+  cancel: () => Promise<UpdateState>
+  signalUiReady: () => Promise<boolean>
   onStateChanged: (callback: (state: UpdateState) => void) => () => void
 }
 

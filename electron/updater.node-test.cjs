@@ -66,8 +66,11 @@ function createSupportedController(options = {}) {
     currentVersion: '1.2.3',
     support: { supported: true, reason: null },
     broadcast: (state) => states.push(state),
+    beginUpdate: options.beginUpdate,
     beforeInstall: options.beforeInstall,
+    installUpdate: options.installUpdate,
     afterInstallFailure: options.afterInstallFailure,
+    cancelUpdate: options.cancelUpdate,
     initialInstalledReleaseHistory: options.initialInstalledReleaseHistory,
     recordUpdateConsent: options.recordUpdateConsent,
     fetchReleaseHistory: options.fetchReleaseHistory,
@@ -122,18 +125,42 @@ test('configures updater for explicit stable upgrades without implicit install',
   })
 })
 
-test('keeps manual Setup assisted while updater-owned launches become silent', () => {
+test('keeps manual Setup assisted while updater-owned installs are wrapped by the branded helper', () => {
   const projectDir = path.join(__dirname, '..')
   const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf8'))
   const includePath = packageJson.build?.nsis?.include
   const include = fs.readFileSync(path.join(projectDir, includePath), 'utf8')
+  const helperSource = fs.readFileSync(path.join(projectDir, 'build', 'update-helper', 'Program.cs'), 'utf8')
 
   assert.equal(packageJson.build.nsis.oneClick, false)
   assert.equal(includePath, 'build/installer.nsh')
+  assert.deepEqual(packageJson.build.extraResources, [{
+    from: 'build/update-helper.exe',
+    to: 'update-helper.exe',
+  }])
   assert.match(include, /!macro\s+customInit/)
   assert.match(include, /\$\{if}\s+\$\{isUpdated}/)
   assert.match(include, /SetSilent\s+silent/)
   assert.doesNotMatch(include, /SilentInstall\s+silent/)
+  assert.match(helperSource, /FormBorderStyle\s*=\s*FormBorderStyle\.None/)
+  assert.match(helperSource, /캘린더 블록을 차곡차곡 쌓는 중/)
+  assert.match(helperSource, /일정과 설정은 안전하게 보존됩니다/)
+  assert.match(helperSource, /messageMilliseconds\s*>=\s*5000/)
+  assert.match(helperSource, /random\.Next/)
+  assert.match(helperSource, /new String\('\.', dotCount\)/)
+  assert.doesNotMatch(helperSource, /다운로드부터 설치까지 한 번에 진행하고 있어요/)
+  assert.doesNotMatch(helperSource, /CreateLabel\("업데이트 중"/)
+  assert.doesNotMatch(helperSource, /SmoothProgress/)
+  assert.match(helperSource, /\/S --updated --force-run/)
+})
+
+test('keeps the public app version stable while identifying the Windows rebuild internally', () => {
+  const projectDir = path.join(__dirname, '..')
+  const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf8'))
+
+  assert.equal(packageJson.version, '0.3.41')
+  assert.equal(packageJson.build.buildNumber, '2')
+  assert.equal(`${packageJson.version}.${packageJson.build.buildNumber}`, '0.3.41.2')
 })
 
 test('unsupported controller never invokes provider operations', async () => {
@@ -155,6 +182,7 @@ test('unsupported controller never invokes provider operations', async () => {
     },
     progress: null,
     error: null,
+    sessionActive: false,
     unsupportedReason: 'portable',
     canCheck: false,
     canDownload: false,
@@ -197,6 +225,34 @@ test('startup discovery alone never downloads or installs an available update', 
   assert.equal(adapter.installCalls, 0)
 })
 
+test('locks the update session immediately and waits for the update UI before downloading', async () => {
+  const uiReady = deferred()
+  const sequence = []
+  const { adapter, controller } = createSupportedController({
+    beginUpdate: () => {
+      sequence.push('begin')
+      return uiReady.promise
+    },
+  })
+  adapter.emit('update-available', { version: '1.3.0' })
+  adapter.downloadImplementation = async () => {
+    sequence.push('download')
+    return ['C:\\cache\\Dayline-Setup.exe']
+  }
+
+  const pendingDownload = controller.download()
+  assert.deepEqual(sequence, ['begin'])
+  assert.equal(controller.getState().status, 'downloading')
+  assert.equal(controller.getState().sessionActive, true)
+  assert.equal(controller.getState().canCheck, false)
+  assert.equal(adapter.downloadCalls, 0)
+
+  uiReady.resolve()
+  await pendingDownload
+  assert.deepEqual(sequence, ['begin', 'download'])
+  assert.equal(adapter.downloadCalls, 1)
+})
+
 test('publishes update availability, safe release metadata, download progress, and auto-installs', async () => {
   const { adapter, controller, states } = createSupportedController()
   adapter.checkImplementation = async () => {
@@ -216,6 +272,7 @@ test('publishes update availability, safe release metadata, download progress, a
     installedReleaseHistory: NO_INSTALLED_HISTORY_1_2_3,
     progress: null,
     error: null,
+    sessionActive: false,
     unsupportedReason: null,
     canCheck: true,
     canDownload: true,
@@ -229,8 +286,9 @@ test('publishes update availability, safe release metadata, download progress, a
   await Promise.all([controller.download(), controller.download()])
   assert.equal(adapter.downloadCalls, 1)
   assert.equal(adapter.installCalls, 1)
-  assert.deepEqual(adapter.installArguments, [true, true])
+  assert.deepEqual(adapter.installArguments, [false, true])
   assert.equal(controller.getState().status, 'installing')
+  assert.equal(controller.getState().sessionActive, true)
   assert.equal(controller.getState().progress, 100)
   assert.equal(controller.getState().canCheck, false)
   const checksBeforeDownloadedRetry = adapter.checkCalls
@@ -254,7 +312,7 @@ test('reports no update and clears stale available version', async () => {
   assert.equal(controller.getState().availableVersion, null)
 })
 
-test('install flushes persistence before invoking a silent forced-relaunch install and is idempotent', async () => {
+test('install flushes persistence before invoking a visible forced-relaunch install and is idempotent', async () => {
   const sequence = []
   const { adapter, controller } = createSupportedController({
     beforeInstall: async () => sequence.push('prepare'),
@@ -268,8 +326,26 @@ test('install flushes persistence before invoking a silent forced-relaunch insta
   await Promise.all([controller.install(), controller.install(), controller.install()])
   assert.deepEqual(sequence, ['prepare', 'quit'])
   assert.equal(adapter.installCalls, 1)
-  assert.deepEqual(adapter.installArguments, [true, true])
+  assert.deepEqual(adapter.installArguments, [false, true])
   assert.equal(controller.getState().status, 'installing')
+})
+
+test('can hand installation to a branded helper without invoking the provider installer directly', async () => {
+  const launches = []
+  const { adapter, controller } = createSupportedController({
+    installUpdate: (...args) => launches.push(args),
+  })
+  adapter.emit('update-downloaded', { version: '1.3.0' })
+
+  await controller.install()
+
+  assert.equal(adapter.installCalls, 0)
+  assert.deepEqual(launches, [[false, true, {
+    currentVersion: '1.2.3',
+    availableVersion: '1.3.0',
+  }]])
+  assert.equal(controller.getState().status, 'installing')
+  assert.equal(controller.getState().sessionActive, true)
 })
 
 test('a failed explicit download never starts the installer', async () => {
@@ -283,8 +359,33 @@ test('a failed explicit download never starts the installer', async () => {
   assert.equal(adapter.downloadCalls, 1)
   assert.equal(adapter.installCalls, 0)
   assert.equal(state.status, 'available')
+  assert.equal(state.sessionActive, true)
   assert.equal(state.canDownload, true)
   assert.equal(state.error, 'UPDATE_DOWNLOAD_FAILED')
+})
+
+test('keeps a failed update locked until explicit cancellation restores the app session', async () => {
+  let cancelCalls = 0
+  const { adapter, controller } = createSupportedController({
+    cancelUpdate: async () => { cancelCalls += 1 },
+  })
+  adapter.emit('update-available', { version: '1.3.0' })
+  adapter.downloadImplementation = async () => {
+    throw new Error('temporary download failure')
+  }
+
+  const failed = await controller.download()
+  assert.equal(failed.status, 'available')
+  assert.equal(failed.sessionActive, true)
+  assert.equal(failed.canCheck, false)
+
+  const cancelled = await controller.cancel()
+  assert.equal(cancelCalls, 1)
+  assert.equal(cancelled.status, 'available')
+  assert.equal(cancelled.sessionActive, false)
+  assert.equal(cancelled.error, null)
+  assert.equal(cancelled.canCheck, true)
+  assert.equal(cancelled.canDownload, true)
 })
 
 test('persists the current and target versions before starting an explicit download', async () => {
@@ -333,7 +434,7 @@ test('a late update-downloaded event consumes explicit consent and installs exac
   adapter.emit('update-downloaded', { version: '1.3.0' })
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(adapter.installCalls, 1)
-  assert.deepEqual(adapter.installArguments, [true, true])
+  assert.deepEqual(adapter.installArguments, [false, true])
   assert.equal(controller.getState().status, 'installing')
 })
 
@@ -359,7 +460,7 @@ test('a stale downloaded event cannot consume consent for a newer retry version'
   adapter.emit('update-downloaded', { version: '1.2.0' })
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(adapter.installCalls, 1)
-  assert.deepEqual(adapter.installArguments, [true, true])
+  assert.deepEqual(adapter.installArguments, [false, true])
   assert.equal(controller.getState().status, 'installing')
 })
 
@@ -380,6 +481,7 @@ test('a stale downloaded event cannot replace a newer available version without 
     installedReleaseHistory: NO_INSTALLED_HISTORY_1_2_3,
     progress: null,
     error: null,
+    sessionActive: false,
     unsupportedReason: null,
     canCheck: true,
     canDownload: true,
@@ -418,7 +520,7 @@ test('manual install persists fallback consent before launching the installer', 
   assert.deepEqual(sequence, [
     ['record', '1.2.3', '1.3.0', '2026-08-13T02:00:00.000Z', 'Dayline 1.3.0', 'Release body'],
     ['prepare'],
-    ['install', true, true],
+    ['install', false, true],
   ])
 })
 
@@ -434,6 +536,7 @@ test('manual install is blocked when fallback consent persistence fails', async 
   assert.equal(adapter.installCalls, 0)
   assert.equal(prepareCalls, 0)
   assert.equal(state.status, 'downloaded')
+  assert.equal(state.sessionActive, false)
   assert.equal(state.canInstall, true)
   assert.equal(state.error, 'UPDATE_INSTALL_FAILED')
 })
@@ -451,8 +554,9 @@ test('a provider download error revokes auto-install consent even if completion 
   adapter.emit('update-downloaded', { version: '1.3.0' })
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(adapter.installCalls, 0)
-  assert.equal(controller.getState().status, 'downloaded')
-  assert.equal(controller.getState().canInstall, true)
+  assert.equal(controller.getState().status, 'available')
+  assert.equal(controller.getState().sessionActive, true)
+  assert.equal(controller.getState().error, 'UPDATE_DOWNLOAD_FAILED')
 })
 
 test('failed installs remain actionable for retry', async () => {
@@ -474,6 +578,7 @@ test('failed installs remain actionable for retry', async () => {
   adapter.downloadImplementation = async () => adapter.emit('update-downloaded', { version: '1.3.0' })
   let state = await controller.download()
   assert.equal(state.status, 'downloaded')
+  assert.equal(state.sessionActive, true)
   assert.equal(state.canInstall, true)
   assert.equal(state.error, 'UPDATE_INSTALL_FAILED')
   assert.equal(recoveryCalls, 1)

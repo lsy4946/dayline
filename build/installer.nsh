@@ -1,7 +1,7 @@
 !macro customInit
-  ; Older Dayline builds launch an update with --updated but without /S.
-  ; Treat only that updater-owned path as silent so the very next upgrade is
-  ; unattended, while a manually opened Setup keeps the normal install wizard.
+  ; The dedicated Dayline update helper owns the visible progress experience.
+  ; Keep the updater-owned NSIS process in the background while preserving the
+  ; normal assisted wizard when the user opens Setup manually.
   ${if} ${isUpdated}
     SetSilent silent
   ${endif}

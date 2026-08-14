@@ -1,4 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen } = require('electron')
+const { spawn } = require('node:child_process')
+const { randomUUID } = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { fileURLToPath } = require('node:url')
@@ -18,6 +20,11 @@ let windowStatePath = ''
 let persistBoundsTimer = null
 let updaterController = null
 let databaseWritesBlocked = false
+let updateSessionActive = false
+let updateUiReadyPromise = null
+let updateUiReadyResolve = null
+let updateUiReadyTimer = null
+let widgetWasVisibleBeforeUpdate = false
 
 const isDev = !app.isPackaged
 const isDatabaseQa = process.env.DAYLINE_DATABASE_QA === '1'
@@ -270,13 +277,141 @@ function openTaskDatabase() {
   })
 }
 
+function settleUpdateUiReady() {
+  if (updateUiReadyTimer) clearTimeout(updateUiReadyTimer)
+  updateUiReadyTimer = null
+  const resolve = updateUiReadyResolve
+  updateUiReadyResolve = null
+  updateUiReadyPromise = null
+  resolve?.()
+}
+
+function beginUpdateSession() {
+  if (updateSessionActive) return updateUiReadyPromise || Promise.resolve()
+  updateSessionActive = true
+  databaseWritesBlocked = true
+  persistWidgetBoundsNow()
+  widgetWasVisibleBeforeUpdate = Boolean(widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isVisible())
+  if (widgetWasVisibleBeforeUpdate) widgetWindow.hide()
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.setClosable(false)
+    mainWindow.setMinimizable(false)
+    mainWindow.show()
+    mainWindow.focus()
+  }
+
+  updateUiReadyPromise = new Promise((resolve) => {
+    updateUiReadyResolve = resolve
+    updateUiReadyTimer = setTimeout(settleUpdateUiReady, 1_500)
+  })
+  return updateUiReadyPromise
+}
+
 function prepareForUpdateInstall() {
   databaseWritesBlocked = true
   persistWidgetBoundsNow()
 }
 
-function recoverFromFailedUpdateInstall() {
+function holdFailedUpdateSession() {
+  databaseWritesBlocked = true
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+}
+
+function cancelUpdateSession() {
+  settleUpdateUiReady()
+  updateSessionActive = false
   databaseWritesBlocked = false
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setClosable(true)
+    mainWindow.setMinimizable(true)
+  }
+  if (widgetWasVisibleBeforeUpdate && widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.show()
+  widgetWasVisibleBeforeUpdate = false
+}
+
+function launchUpdateHelper({ currentVersion, availableVersion }) {
+  const installerPath = autoUpdater.installerPath
+  const helperPath = path.join(process.resourcesPath, 'update-helper.exe')
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    throw new Error('Downloaded Dayline installer is unavailable')
+  }
+  if (!fs.existsSync(helperPath)) {
+    throw new Error('Dayline update helper is unavailable')
+  }
+
+  const readyFile = path.join(
+    app.getPath('temp'),
+    `dayline-update-ready-${randomUUID()}.tmp`,
+  )
+  try {
+    fs.unlinkSync(readyFile)
+  } catch {
+    // A unique ready marker normally does not exist yet.
+  }
+
+  const child = spawn(helperPath, [
+    '--installer', installerPath,
+    '--parent-pid', String(process.pid),
+    '--app', process.execPath,
+    '--ready-file', readyFile,
+    '--from-version', currentVersion,
+    '--to-version', availableVersion || '',
+  ], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+  })
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let pollTimer = null
+    const startedAt = Date.now()
+    const cleanupReadyFile = () => {
+      try {
+        fs.unlinkSync(readyFile)
+      } catch {
+        // The helper or a failed launch may already have removed the marker.
+      }
+    }
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      clearInterval(pollTimer)
+      cleanupReadyFile()
+      try {
+        child.kill()
+      } catch {
+        // Best-effort cleanup of an unresponsive helper process.
+      }
+      reject(error)
+    }
+    pollTimer = setInterval(() => {
+      if (fs.existsSync(readyFile) && child.exitCode === null) {
+        settled = true
+        clearInterval(pollTimer)
+        cleanupReadyFile()
+        child.removeListener('error', fail)
+        child.unref()
+        setImmediate(() => app.quit())
+        resolve()
+        return
+      }
+      if (child.exitCode !== null) {
+        fail(new Error(`Dayline update helper exited with code ${child.exitCode}`))
+        return
+      }
+      if (Date.now() - startedAt >= 4_000) {
+        fail(new Error('Dayline update helper did not become ready'))
+      }
+    }, 35)
+    child.once('error', fail)
+  })
 }
 
 function createAppUpdater() {
@@ -306,8 +441,11 @@ function createAppUpdater() {
     currentVersion,
     support,
     broadcast: broadcastUpdateState,
+    beginUpdate: beginUpdateSession,
     beforeInstall: prepareForUpdateInstall,
-    afterInstallFailure: recoverFromFailedUpdateInstall,
+    installUpdate: (_isSilent, _forceRunAfter, versions) => launchUpdateHelper(versions),
+    afterInstallFailure: holdFailedUpdateSession,
+    cancelUpdate: cancelUpdateSession,
     initialInstalledReleaseHistory,
     recordUpdateConsent: (fromVersion, targetVersion, recordedAt, releaseName, releaseNotes) => {
       if (databaseWritesBlocked || !taskDatabase) throw new Error('Dayline database is unavailable while updating')
@@ -362,6 +500,7 @@ function registerIpc() {
   }
   ipcMain.on('dayline:store-apply-sync', applyStoreMutations)
   ipcMain.handle('dayline:widget-open', () => {
+    if (updateSessionActive) return readWindowState().widget
     createWidgetWindow()
     return readWindowState().widget
   })
@@ -371,6 +510,7 @@ function registerIpc() {
     return true
   })
   ipcMain.handle('dayline:widget-toggle-pin', () => {
+    if (updateSessionActive) return null
     if (!widgetWindow || widgetWindow.isDestroyed()) return null
     const next = !widgetWindow.isAlwaysOnTop()
     widgetWindow.setAlwaysOnTop(next, 'floating')
@@ -380,6 +520,7 @@ function registerIpc() {
     return { pinned: next }
   })
   ipcMain.handle('dayline:widget-toggle-lock', () => {
+    if (updateSessionActive) return null
     if (!widgetWindow || widgetWindow.isDestroyed()) return null
     const nextLocked = widgetWindow.isResizable()
     widgetWindow.setResizable(!nextLocked)
@@ -390,6 +531,7 @@ function registerIpc() {
     return { locked: nextLocked }
   })
   ipcMain.handle('dayline:widget-reset-bounds', () => {
+    if (updateSessionActive) return null
     if (!widgetWindow || widgetWindow.isDestroyed()) return null
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
     const width = 390
@@ -424,6 +566,13 @@ function registerIpc() {
   ipcMain.handle('dayline:update-check', (event) => invokeUpdater(event, 'check'))
   ipcMain.handle('dayline:update-download', (event) => invokeUpdater(event, 'download'))
   ipcMain.handle('dayline:update-install', (event) => invokeUpdater(event, 'install'))
+  ipcMain.handle('dayline:update-cancel', (event) => invokeUpdater(event, 'cancel'))
+  ipcMain.handle('dayline:update-ui-ready', (event) => {
+    if (!trustedMainWindow(event.sender)) throw new Error('Untrusted Dayline updater sender')
+    if (!updateSessionActive) return false
+    settleUpdateUiReady()
+    return true
+  })
 }
 
 const singleInstance = app.requestSingleInstanceLock()
@@ -452,7 +601,9 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  settleUpdateUiReady()
   databaseWritesBlocked = true
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setClosable(true)
   persistWidgetBoundsNow()
   closeTaskDatabase()
 })

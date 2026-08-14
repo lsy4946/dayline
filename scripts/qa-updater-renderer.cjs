@@ -184,38 +184,125 @@ app.whenReady().then(async () => {
   assert.equal(releaseNotes.scrollMoved, true)
 
   await runIn(window, `document.querySelector('[data-qa="update-dialog-primary"]')?.click()`)
-  qaStage = 'download-progress'
+  qaStage = 'unified-update-progress'
   const downloading = await waitFor(window, `(() => {
-    const progress = document.querySelector('[data-qa="update-dialog-progress"]')
-    if (!progress) return null
+    const layer = document.querySelector('[data-qa="update-session"]')
+    const card = layer?.querySelector('[role="alertdialog"]')
+    const progress = layer?.querySelector('[data-qa="update-session-progress"]')
+    const meta = layer?.querySelector('.update-session-meta')
+    const calls = window.dayline.__updateQa.getCalls()
+    if (!layer || !card || !progress || !meta || calls.signalUiReady < 1) return null
     return {
       role: progress.getAttribute('role'),
       min: progress.getAttribute('aria-valuemin'),
       max: progress.getAttribute('aria-valuemax'),
-      now: progress.getAttribute('aria-valuenow'),
-      calls: window.dayline.__updateQa.getCalls().download,
+      modal: card.getAttribute('aria-modal'),
+      focused: document.activeElement === card,
+      outsideInert: Boolean(document.querySelector('.main-shell')?.inert),
+      hasDismissAction: Boolean(layer.querySelector('[data-qa="update-dialog-later"], [data-qa="update-session-cancel"]')),
+      oldPromptVisible: Boolean(document.querySelector('[data-qa="update-available-dialog"]')),
+      downloadCalls: calls.download,
+      uiReadyCalls: calls.signalUiReady,
+      versionBesideLabel: Boolean(meta.querySelector('.update-session-eyebrow') && meta.querySelector('.update-session-version')),
+      calendarBlockCount: layer.querySelectorAll('.update-session-blocks > span').length,
+      hasLinearProgress: Boolean(layer.querySelector('.update-session-progress > i')),
+      copy: layer.innerText,
     }
-  })()`, 'dialog download progress')
-  assert.deepEqual(downloading, { role: 'progressbar', min: '0', max: '100', now: '37', calls: 1 })
+  })()`, 'unified update progress')
+  assert.equal(downloading.role, 'progressbar')
+  assert.equal(downloading.min, '0')
+  assert.equal(downloading.max, '100')
+  assert.equal(downloading.modal, 'true')
+  assert.equal(downloading.focused, true)
+  assert.equal(downloading.outsideInert, true)
+  assert.equal(downloading.hasDismissAction, false)
+  assert.equal(downloading.oldPromptVisible, false)
+  assert.equal(downloading.downloadCalls, 1)
+  assert.ok(downloading.uiReadyCalls >= 1)
+  assert.equal(downloading.versionBesideLabel, true)
+  assert.equal(downloading.calendarBlockCount, 7)
+  assert.equal(downloading.hasLinearProgress, false)
+  assert.equal(downloading.copy.includes('다운로드부터 설치까지 한 번에'), false)
+  assert.equal(downloading.copy.includes('업데이트 중'), false)
+  assert.ok(downloading.copy.includes('일정과 설정은 안전하게 보존됩니다'))
 
-  qaStage = 'silent-auto-install'
-  const silentInstall = await waitFor(window, `(() => {
+  qaStage = 'visible-auto-install-handoff'
+  const visibleInstall = await waitFor(window, `(() => {
     const calls = window.dayline.__updateQa.getCalls()
-    const dialog = document.querySelector('[data-qa="update-available-dialog"]')
-    if (calls.install !== 1 || dialog?.dataset.state !== 'installing') return null
+    const layer = document.querySelector('[data-qa="update-session"]')
+    if (calls.install !== 1 || layer?.dataset.state !== 'installing') return null
     return {
       downloadCalls: calls.download,
       installCalls: calls.install,
       installArguments: calls.installArguments,
-      hasManualInstallAction: Boolean(document.querySelector('[data-qa="update-dialog-primary"]')),
-      copy: dialog?.innerText,
+      hasAction: Boolean(layer.querySelector('button')),
+      copy: layer?.innerText,
     }
-  })()`, 'silent installation immediately after download')
-  assert.equal(silentInstall.downloadCalls, 1)
-  assert.equal(silentInstall.installCalls, 1)
-  assert.deepEqual(silentInstall.installArguments, [true, true])
-  assert.equal(silentInstall.hasManualInstallAction, false)
-  assert.ok(silentInstall.copy.includes('설치하고'))
+  })()`, 'visible installation handoff immediately after download')
+  assert.equal(visibleInstall.downloadCalls, 1)
+  assert.equal(visibleInstall.installCalls, 1)
+  assert.deepEqual(visibleInstall.installArguments, [false, true])
+  assert.equal(visibleInstall.hasAction, false)
+  assert.equal(visibleInstall.copy.includes('업데이트 중'), false)
+  assert.match(visibleInstall.copy, /\d+%/)
+
+  qaStage = 'failed-update-recovery'
+  const failedWindow = new BrowserWindow({
+    width: 1120,
+    height: 700,
+    show: false,
+    webPreferences: {
+      backgroundThrottling: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'qa-updater-preload.cjs'),
+    },
+  })
+  const failedLoaded = waitForLoad(failedWindow)
+  await failedWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+    query: { mode: 'main', qaDate: '2026-08-12', updateQa: 'available', updateQaScale: '1.5' },
+  })
+  await failedLoaded
+  await waitFor(failedWindow, `Boolean(document.querySelector('[data-qa="update-dialog-primary"]'))`, 'failed-update consent prompt')
+  await runIn(failedWindow, `window.dayline.__updateQa.failNextDownload()`)
+  await runIn(failedWindow, `document.querySelector('[data-qa="update-dialog-primary"]')?.click()`)
+  const failedUpdate = await waitFor(failedWindow, `(() => {
+    const layer = document.querySelector('[data-qa="update-session"]')
+    const retry = layer?.querySelector('[data-qa="update-session-retry"]')
+    const cancel = layer?.querySelector('[data-qa="update-session-cancel"]')
+    if (!layer || !retry || !cancel) return null
+    return {
+      state: layer.dataset.state,
+      copy: layer.innerText,
+      shellInert: Boolean(document.querySelector('.main-shell')?.inert),
+      focusedInside: layer.contains(document.activeElement),
+      fitsViewport: (() => {
+        const bounds = layer.querySelector('[role="alertdialog"]')?.getBoundingClientRect()
+        return Boolean(bounds && bounds.top >= 0 && bounds.bottom <= innerHeight)
+      })(),
+    }
+  })()`, 'failed update recovery actions')
+  assert.equal(failedUpdate.state, 'available')
+  assert.ok(failedUpdate.copy.includes('업데이트를 이어가지 못했어요'))
+  assert.equal(failedUpdate.shellInert, true)
+  assert.equal(failedUpdate.focusedInside, true)
+  assert.equal(failedUpdate.fitsViewport, true, 'The update card must not clip at 150% text scale')
+
+  await runIn(failedWindow, `(() => {
+    const card = document.querySelector('[data-qa="update-session"] [role="alertdialog"]')
+    card?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+    }))
+  })()`)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(
+    await runIn(failedWindow, `Boolean(document.querySelector('[data-qa="update-session"]'))`),
+    true,
+    'Escape must not dismiss an active update session',
+  )
+  await runIn(failedWindow, `document.querySelector('[data-qa="update-session-cancel"]')?.click()`)
+  await waitFor(failedWindow, `!document.querySelector('[data-qa="update-session"]')
+    && !document.querySelector('.main-shell')?.inert`, 'explicit update cancellation')
+  assert.equal(await runIn(failedWindow, `window.dayline.__updateQa.getCalls().cancel`), 1)
 
   // A second isolated renderer verifies the explicit "latest" manual result without
   // coupling to the available-version notification flow above.
@@ -481,6 +568,7 @@ app.whenReady().then(async () => {
 
   qaStage = 'cleanup'
   window.destroy()
+  failedWindow.destroy()
   latestWindow.destroy()
   startupWindow.destroy()
   taskConflictWindow.destroy()

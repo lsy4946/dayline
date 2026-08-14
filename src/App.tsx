@@ -155,6 +155,7 @@ const UNSUPPORTED_UPDATE_STATE: UpdateState = {
   },
   progress: null,
   error: null,
+  sessionActive: false,
   unsupportedReason: 'development',
   canCheck: false,
   canDownload: false,
@@ -2606,6 +2607,206 @@ function UpdateAvailableDialog({
   )
 }
 
+const UPDATE_SESSION_MESSAGES = [
+  '캘린더 블록을 차곡차곡 쌓는 중',
+  '일정들의 자리를 반듯하게 맞추는 중',
+  '마지막 체크 표시를 다듬는 중',
+  '새 Dayline에 오늘을 옮겨 담는 중',
+]
+
+function randomUpdateMessageIndex(previous = -1) {
+  if (UPDATE_SESSION_MESSAGES.length < 2) return 0
+  if (previous < 0) return Math.floor(Math.random() * UPDATE_SESSION_MESSAGES.length)
+  const candidate = Math.floor(Math.random() * (UPDATE_SESSION_MESSAGES.length - 1))
+  return candidate >= previous ? candidate + 1 : candidate
+}
+
+function UpdateSessionOverlay({
+  state,
+  onRetry,
+  onCancel,
+}: {
+  state: UpdateState
+  onRetry: () => void
+  onCancel: () => void
+}) {
+  const layerRef = useRef<HTMLDivElement | null>(null)
+  const cardRef = useRef<HTMLElement | null>(null)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [messageIndex, setMessageIndex] = useState(() => randomUpdateMessageIndex())
+  const [messageVisible, setMessageVisible] = useState(true)
+  const [dotCount, setDotCount] = useState(1)
+  const [displayProgress, setDisplayProgress] = useState(4)
+  const failed = Boolean(state.error)
+  const downloadProgress = clamp(state.progress ?? 0, 0, 100)
+
+  useEffect(() => {
+    if (state.sessionActive) return
+    setElapsedSeconds(0)
+    setMessageIndex((current) => randomUpdateMessageIndex(current))
+    setMessageVisible(true)
+    setDotCount(1)
+    setDisplayProgress(4)
+  }, [state.sessionActive])
+
+  useEffect(() => {
+    if (!state.sessionActive || !layerRef.current || !cardRef.current) return
+    const releaseInert = makeOutsideInert(layerRef.current)
+    cardRef.current.focus({ preventScroll: true })
+    let secondFrame = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        void getRendererUpdatesApi()?.signalUiReady().catch(() => {})
+      })
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) window.cancelAnimationFrame(secondFrame)
+      releaseInert()
+    }
+  }, [state.sessionActive])
+
+  useEffect(() => {
+    if (!state.sessionActive || failed) return
+    const startedAt = Date.now()
+    const tick = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000))
+    tick()
+    const timer = window.setInterval(tick, 1_000)
+    return () => window.clearInterval(timer)
+  }, [failed, state.sessionActive])
+
+  useEffect(() => {
+    if (!state.sessionActive || failed) return
+    const timer = window.setInterval(() => {
+      setDotCount((current) => current === 3 ? 1 : current + 1)
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [failed, state.sessionActive])
+
+  useEffect(() => {
+    if (!state.sessionActive || failed) {
+      setMessageVisible(true)
+      return
+    }
+    let fadeTimer = 0
+    const timer = window.setInterval(() => {
+      setMessageVisible(false)
+      fadeTimer = window.setTimeout(() => {
+        setMessageIndex((current) => randomUpdateMessageIndex(current))
+        setMessageVisible(true)
+      }, 240)
+    }, 5_000)
+    return () => {
+      window.clearInterval(timer)
+      window.clearTimeout(fadeTimer)
+    }
+  }, [failed, state.sessionActive])
+
+  useEffect(() => {
+    if (!state.sessionActive || failed) return
+    const nextProgress = state.status === 'downloading'
+      ? 5 + downloadProgress * 0.4
+      : state.status === 'downloaded'
+        ? 47
+        : state.status === 'installing'
+          ? 52
+          : 4
+    setDisplayProgress((current) => Math.max(current, Math.round(nextProgress)))
+  }, [downloadProgress, failed, state.sessionActive, state.status])
+
+  if (!state.sessionActive) return null
+
+  const retryInstall = state.status === 'downloaded'
+  const filledBlocks = Math.max(1, Math.min(7, Math.ceil(displayProgress / 14.3)))
+  const statusCopy = failed
+    ? retryInstall ? '설치 프로그램을 시작하지 못했어요' : '업데이트를 이어가지 못했어요'
+    : `${UPDATE_SESSION_MESSAGES[messageIndex]}${'.'.repeat(dotCount)}`
+
+  return (
+    <div
+      ref={layerRef}
+      className="update-session-layer"
+      data-qa="update-session"
+      data-state={state.status}
+    >
+      <section
+        ref={cardRef}
+        className={`update-session-card${failed ? ' is-error' : ''}`}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="update-session-title"
+        aria-describedby={failed ? 'update-session-description' : undefined}
+        tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
+            return
+          }
+          trapDialogFocus(event)
+        }}
+      >
+        <div className="update-session-brand" aria-hidden="true">
+          <span><CalendarDays size={22} strokeWidth={2.25} /></span>
+          <strong>DAYLINE</strong>
+        </div>
+        <div className="update-session-meta">
+          <span className="update-session-eyebrow">DAYLINE UPDATE</span>
+          <div className="update-session-version" aria-label={`현재 ${versionLabel(state.currentVersion)}, 업데이트 ${versionLabel(state.availableVersion)}`}>
+            <span>{versionLabel(state.currentVersion)}</span>
+            <i aria-hidden="true">→</i>
+            <strong>{versionLabel(state.availableVersion)}</strong>
+          </div>
+        </div>
+        <h2 id="update-session-title" className={`update-session-message${messageVisible ? '' : ' is-changing'}`}>{statusCopy}</h2>
+        {failed && <p id="update-session-description">{updateErrorCopy(state.error ?? '')}</p>}
+
+        <div
+          className="update-session-percent"
+          data-qa="update-session-progress"
+          role="progressbar"
+          aria-label="Dayline 업데이트 전체 진행률"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={failed ? undefined : displayProgress}
+          aria-valuetext={failed ? '업데이트 일시 중지' : `${displayProgress}% 진행`}
+        >
+          {failed ? '일시 중지' : `${displayProgress}%`}
+        </div>
+
+        <div className="update-session-blocks" aria-hidden="true">
+          {Array.from({ length: 7 }, (_, index) => (
+            <span
+              key={index}
+              className={index < filledBlocks ? 'is-filled' : ''}
+              style={{ '--update-block-index': index } as CSSProperties}
+            >
+              <i />
+            </span>
+          ))}
+        </div>
+
+        {failed ? (
+          <div className="update-session-actions">
+            <button type="button" className="primary-button" data-qa="update-session-retry" onClick={onRetry}>
+              <RefreshCw size={15} /> 다시 시도
+            </button>
+            <button type="button" className="secondary-button" data-qa="update-session-cancel" onClick={onCancel}>
+              업데이트를 취소하고 돌아가기
+            </button>
+          </div>
+        ) : (
+          <div className="update-session-reassurance">
+            <span><Lock size={13} /> 일정과 설정은 안전하게 보존됩니다</span>
+            <small>{elapsedSeconds < 30 ? '보통 10~30초 정도 걸려요' : `${elapsedSeconds}초째 차분히 진행 중이에요`}</small>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
 function Toast({ toast, onClose }: { toast: ToastMessage | null; onClose: () => void }) {
   useEffect(() => {
     if (!toast) return
@@ -3613,6 +3814,7 @@ function MainView(props: SharedViewProps) {
   }, [])
 
   useEffect(() => {
+    if (updateState.sessionActive) return
     if (updateState.status !== 'available' && updateState.status !== 'downloaded') return
     if (modalOpen || templateModalOpen || recoveryOpen || helpOpen) return
     const version = updateState.availableVersion
@@ -3625,10 +3827,25 @@ function MainView(props: SharedViewProps) {
     recoveryOpen,
     templateModalOpen,
     updateState.availableVersion,
+    updateState.sessionActive,
     updateState.status,
   ])
 
-  const runUpdateAction = useCallback(async (action: 'check' | 'download' | 'install') => {
+  useEffect(() => {
+    if (!updateState.sessionActive) return
+    setModalOpen(false)
+    setEditingTask(null)
+    setRecoveryOpen(false)
+    setSearchOpen(false)
+    setNoteComposerOpen(false)
+    setRailPanel(null)
+    setTemplateModalOpen(false)
+    setEditingTemplate(null)
+    setHelpOpen(false)
+    setUpdatePromptOpen(false)
+  }, [updateState.sessionActive])
+
+  const runUpdateAction = useCallback(async (action: 'check' | 'download' | 'install' | 'cancel') => {
     const updates = getRendererUpdatesApi()
     if (!updates || updateActionInFlightRef.current) return
     updateActionInFlightRef.current = true
@@ -3641,7 +3858,7 @@ function MainView(props: SharedViewProps) {
         status: 'error',
         progress: null,
         error: reason instanceof Error ? reason.message : '업데이트 서버에 연결하지 못했어요.',
-        canCheck: true,
+        canCheck: action === 'cancel' ? current.canCheck : !current.sessionActive,
       }))
     } finally {
       updateActionInFlightRef.current = false
@@ -4617,11 +4834,16 @@ function MainView(props: SharedViewProps) {
       <RecoveryPanel open={recoveryOpen} tasks={deleted} onClose={closeRecovery} onRestore={onTaskRestore} />
     </div>
     <UpdateAvailableDialog
-      open={updatePromptOpen}
+      open={updatePromptOpen && !updateState.sessionActive}
       state={updateState}
       onLater={() => setUpdatePromptOpen(false)}
       onDownload={() => void runUpdateAction('download')}
       onInstall={() => void runUpdateAction('install')}
+    />
+    <UpdateSessionOverlay
+      state={updateState}
+      onRetry={() => void runUpdateAction(updateState.status === 'downloaded' ? 'install' : 'download')}
+      onCancel={() => void runUpdateAction('cancel')}
     />
     <HelpTour id="main-help-tour" open={helpOpen} steps={MAIN_HELP_STEPS} onClose={() => setHelpOpen(false)} />
     </>

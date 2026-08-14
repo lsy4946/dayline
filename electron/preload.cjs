@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('dayline', {
     check: () => ipcRenderer.invoke('dayline:update-check'),
     download: () => ipcRenderer.invoke('dayline:update-download'),
     install: () => ipcRenderer.invoke('dayline:update-install'),
+    cancel: () => ipcRenderer.invoke('dayline:update-cancel'),
+    signalUiReady: () => ipcRenderer.invoke('dayline:update-ui-ready'),
     onStateChanged: (callback) => {
       const listener = (_event, state) => callback(state)
       ipcRenderer.on('dayline:update-state', listener)

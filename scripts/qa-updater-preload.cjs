@@ -16,8 +16,9 @@ const baseState = (status, patch = {}) => ({
   },
   progress: null,
   error: null,
+  sessionActive: false,
   unsupportedReason: null,
-  canCheck: !['checking', 'downloading', 'downloaded', 'installing'].includes(status),
+  canCheck: patch.sessionActive !== true && !['checking', 'downloading', 'downloaded', 'installing'].includes(status),
   canDownload: status === 'available',
   canInstall: status === 'downloaded',
   ...patch,
@@ -81,12 +82,19 @@ const unavailableInstalledReleaseHistory = {
   releaseNotes: null,
 }
 
-const initialMode = new URLSearchParams(location.search).get('updateQa')
+const qaParams = new URLSearchParams(location.search)
+const initialMode = qaParams.get('updateQa')
+const requestedFontScale = Number(qaParams.get('updateQaScale'))
+const initialFontScale = Number.isFinite(requestedFontScale)
+  ? Math.max(0.8, Math.min(1.5, requestedFontScale))
+  : 1
 let current = initialMode === 'available'
   ? baseState('available', releasePatch)
   : baseState('idle')
 const listeners = new Set()
-const calls = { check: 0, download: 0, install: 0, installArguments: null }
+const calls = { check: 0, download: 0, install: 0, cancel: 0, signalUiReady: 0, installArguments: null }
+let failNextDownload = false
+let updateUiReadyResolve = null
 const store = {
   version: 4,
   revision: 0,
@@ -96,7 +104,7 @@ const store = {
   settings: {
     sidebarSplit: 50,
     widgetSplit: 50,
-    fontScale: 1,
+    fontScale: initialFontScale,
     themeColor: '#255F4B',
     calendarWeekScroll: false,
   },
@@ -125,18 +133,42 @@ contextBridge.exposeInMainWorld('dayline', {
     },
     download: async () => {
       calls.download += 1
-      emit(baseState('downloading', { ...releasePatch, progress: 37, canCheck: false }))
+      emit(baseState('downloading', { ...releasePatch, progress: 0, sessionActive: true, canCheck: false }))
+      await Promise.race([
+        new Promise((resolve) => { updateUiReadyResolve = resolve }),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ])
+      updateUiReadyResolve = null
+      emit(baseState('downloading', { ...releasePatch, progress: 37, sessionActive: true, canCheck: false }))
       await new Promise((resolve) => setTimeout(resolve, 90))
-      emit(baseState('downloaded', { ...releasePatch, progress: 100 }))
+      if (failNextDownload) {
+        failNextDownload = false
+        return emit(baseState('available', {
+          ...releasePatch,
+          error: 'UPDATE_DOWNLOAD_FAILED',
+          sessionActive: true,
+          canCheck: false,
+        }))
+      }
+      emit(baseState('downloaded', { ...releasePatch, progress: 100, sessionActive: true }))
       await new Promise((resolve) => setTimeout(resolve, 20))
       calls.install += 1
-      calls.installArguments = [true, true]
-      return emit(baseState('installing', { ...releasePatch, progress: 100, canCheck: false }))
+      calls.installArguments = [false, true]
+      return emit(baseState('installing', { ...releasePatch, progress: 100, sessionActive: true, canCheck: false }))
     },
     install: async () => {
       calls.install += 1
-      calls.installArguments = [true, true]
-      return emit(baseState('installing', { ...releasePatch, progress: 100, canCheck: false }))
+      calls.installArguments = [false, true]
+      return emit(baseState('installing', { ...releasePatch, progress: 100, sessionActive: true, canCheck: false }))
+    },
+    cancel: async () => {
+      calls.cancel += 1
+      return emit(baseState('available', releasePatch))
+    },
+    signalUiReady: async () => {
+      calls.signalUiReady += 1
+      updateUiReadyResolve?.()
+      return true
     },
     onStateChanged: (listener) => {
       listeners.add(listener)
@@ -147,6 +179,7 @@ contextBridge.exposeInMainWorld('dayline', {
     getCalls: () => ({ ...calls }),
     getState: () => ({ ...current }),
     available: () => emit(baseState('available', releasePatch)),
+    failNextDownload: () => { failNextDownload = true },
     notAvailable: () => emit(baseState('not-available', { installedReleaseHistory })),
     unavailableHistory: () => emit(baseState('not-available', {
       installedReleaseHistory: unavailableInstalledReleaseHistory,
