@@ -1,6 +1,6 @@
 {
   "name": "dayline",
-  "version": "0.1.0",
+  "version": "0.3.41",
   "private": true,
   "description": "Calendar-first offline todo widget for Windows",
   "author": "Dayline",
@@ -9,13 +9,23 @@
     "dev": "concurrently -k -s first \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "build": "tsc -b && vite build",
     "build:icon": "node scripts/build-icon.mjs",
-    "test": "vitest run",
+    "build:update-helper": "node scripts/build-update-helper.cjs",
+    "test": "vitest run && node --test electron/database.node-test.cjs electron/updater.node-test.cjs",
+    "test:db": "node --test electron/database.node-test.cjs",
     "test:watch": "vitest",
     "qa:capture": "npm run build && electron scripts/capture-electron.cjs",
-    "dist:win": "npm run build && electron-builder --win nsis --x64 --config.win.artifactName=Dayline-Setup-${version}-${arch}.${ext} && electron-builder --win portable --x64 --config.win.artifactName=Dayline-Portable-${version}-${arch}.${ext}",
+    "qa:database": "electron scripts/check-electron-database.cjs && electron scripts/qa-electron-database-ipc.cjs",
+    "qa:update": "npm run build && electron scripts/qa-updater-renderer.cjs",
+    "qa:update:local:build": "node scripts/build-local-update-qa.cjs",
+    "qa:update:local:start": "node scripts/start-local-update-qa.cjs",
+    "qa:update:local:stop": "node scripts/stop-local-update-qa.cjs",
+    "dist:setup": "npm run build && npm run build:update-helper && electron-builder --win nsis --x64 --config.win.artifactName=Dayline-Setup-${version}-${arch}.${ext}",
+    "dist:win": "npm run build && npm run build:update-helper && electron-builder --win nsis --x64 --config.win.artifactName=Dayline-Setup-${version}-${arch}.${ext} && electron-builder --win portable --x64 --config.win.artifactName=Dayline-Portable-${version}-${arch}.${ext}",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@hyunbinseo/holidays-kr": "5.2027.1",
+    "electron-updater": "6.8.9",
     "lucide-react": "1.31.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
@@ -27,7 +37,7 @@
     "concurrently": "10.0.4",
     "cross-env": "10.1.0",
     "electron": "43.3.0",
-    "electron-builder": "26.15.3",
+    "electron-builder": "26.15.7",
     "png-to-ico": "3.0.2",
     "sharp": "0.35.3",
     "typescript": "6.0.3",
@@ -38,6 +48,7 @@
   "build": {
     "appId": "com.dayline.desktop",
     "productName": "Dayline",
+    "buildNumber": "2",
     "asar": true,
     "directories": {
       "output": "release",
@@ -48,20 +59,32 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/update-helper.exe",
+        "to": "update-helper.exe"
+      }
+    ],
     "win": {
       "icon": "build/icon.ico",
+      "verifyUpdateCodeSignature": false,
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "oneClick": false,
@@ -69,8 +92,20 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Dayline",
-      "installerLanguages": ["ko_KR", "en_US"],
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "ko_KR",
+        "en_US"
+      ],
       "language": "1042"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lsy4946",
+        "repo": "dayline",
+        "releaseType": "release"
+      }
+    ]
   }
 }

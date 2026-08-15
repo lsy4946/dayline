@@ -5,6 +5,7 @@ qa/
 coverage/
 out/
 installer/
+build/update-helper.exe
 
 # Local secrets and machine-specific credentials
 .env

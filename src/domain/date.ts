@@ -16,6 +16,12 @@ export function fromDateKey(key: string): Date {
   return new Date(year, month - 1, day, 12, 0, 0, 0)
 }
 
+export function isDateKey(key: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return false
+  const date = fromDateKey(key)
+  return Number.isFinite(date.getTime()) && toDateKey(date) === key
+}
+
 export function todayKey(): string {
   return toDateKey(new Date())
 }
@@ -30,6 +36,38 @@ export function addDaysKey(key: string, amount: number): string {
   return toDateKey(addDays(fromDateKey(key), amount))
 }
 
+export function inclusiveDateKeys(startDate: string, endDate: string): string[] {
+  if (!isDateKey(startDate) || !isDateKey(endDate) || startDate > endDate) return []
+  const keys: string[] = []
+  for (let key = startDate; key <= endDate; key = addDaysKey(key, 1)) keys.push(key)
+  return keys
+}
+
+export function dateRangeContains(startDate: string, endDate: string, dateKey: string): boolean {
+  return isDateKey(startDate)
+    && isDateKey(endDate)
+    && isDateKey(dateKey)
+    && startDate <= dateKey
+    && dateKey <= endDate
+}
+
+export function dateRangesOverlap(
+  firstStart: string,
+  firstEnd: string,
+  secondStart: string,
+  secondEnd: string,
+): boolean {
+  if (
+    !isDateKey(firstStart)
+    || !isDateKey(firstEnd)
+    || !isDateKey(secondStart)
+    || !isDateKey(secondEnd)
+    || firstStart > firstEnd
+    || secondStart > secondEnd
+  ) return false
+  return firstStart <= secondEnd && secondStart <= firstEnd
+}
+
 export function startOfMonth(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), 1, 12, 0, 0, 0)
 }
@@ -38,17 +76,25 @@ export function shiftMonth(date: Date, amount: number): Date {
   return new Date(date.getFullYear(), date.getMonth() + amount, 1, 12, 0, 0, 0)
 }
 
-export function calendarDays(month: Date): CalendarDay[] {
+export function calendarGridStart(month: Date): Date {
   const first = startOfMonth(month)
-  const gridStart = addDays(first, -first.getDay())
+  return addDays(first, -first.getDay())
+}
+
+export function calendarDaysFromStart(gridStart: Date, currentMonth: Date): CalendarDay[] {
   return Array.from({ length: 42 }, (_, index) => {
     const date = addDays(gridStart, index)
     return {
       key: toDateKey(date),
       date,
-      inCurrentMonth: date.getMonth() === month.getMonth(),
+      inCurrentMonth: date.getMonth() === currentMonth.getMonth()
+        && date.getFullYear() === currentMonth.getFullYear(),
     }
   })
+}
+
+export function calendarDays(month: Date): CalendarDay[] {
+  return calendarDaysFromStart(calendarGridStart(month), month)
 }
 export function formatMonthTitle(date: Date): string {
   return new Intl.DateTimeFormat('ko-KR', {
