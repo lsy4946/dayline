@@ -134,7 +134,7 @@ async function installQaHelpers(window) {
           }))
           return true
         },
-        dragTaskDate: (taskId, sourceDate, targetDate, targetTaskId = null) => {
+        dragTaskDate: (taskId, sourceDate, targetDate, targetTaskId = null, copy = false) => {
           const sourceSegment = [...document.querySelectorAll(
             '[data-qa="calendar-task-segment"][data-task-id="' + CSS.escape(taskId) + '"]',
           )].find((segment) => segment.dataset.segmentStart <= sourceDate
@@ -171,18 +171,22 @@ async function installQaHelpers(window) {
           const dataTransfer = new DataTransfer()
           source.dispatchEvent(new DragEvent('dragstart', {
             bubbles: true, cancelable: true, dataTransfer,
+            ctrlKey: copy,
             clientX: start.x, clientY: start.y,
           }))
           target.dispatchEvent(new DragEvent('dragenter', {
             bubbles: true, cancelable: true, dataTransfer,
+            ctrlKey: copy,
             clientX: finish.x, clientY: finish.y,
           }))
           target.dispatchEvent(new DragEvent('dragover', {
             bubbles: true, cancelable: true, dataTransfer,
+            ctrlKey: copy,
             clientX: finish.x, clientY: finish.y,
           }))
           target.dispatchEvent(new DragEvent('drop', {
             bubbles: true, cancelable: true, dataTransfer,
+            ctrlKey: copy,
             clientX: finish.x, clientY: finish.y,
           }))
           source.dispatchEvent(new DragEvent('dragend', {
@@ -2628,6 +2632,60 @@ app.whenReady().then(async () => {
     'restored single-day date persists',
   )
 
+  const taskCountBeforeCtrlCopy = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length ?? -1`,
+  )
+  const ctrlCopyGesture = await runIn(
+    mainWindow,
+    `window.__daylineQa.dragTaskDate(
+      'qa-task-a',
+      ${JSON.stringify(today)},
+      ${JSON.stringify(singleMoveTarget)},
+      null,
+      true,
+    )`,
+  )
+  assert.ok(ctrlCopyGesture, 'Ctrl+drag must expose the same calendar date drag surface')
+  const ctrlCopiedTask = await waitForRenderer(mainWindow, `(() => {
+    const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+    const source = store?.tasks?.find((task) => task.id === 'qa-task-a')
+    const copied = store?.tasks?.find((task) => task.id !== 'qa-task-a'
+      && task.title === 'QA 상세 일정'
+      && task.startDate === ${JSON.stringify(singleMoveTarget)})
+    if (!source || !copied || store.tasks.length !== ${taskCountBeforeCtrlCopy + 1}) return null
+    return {
+      id: copied.id,
+      sourceStart: source.startDate,
+      copiedStart: copied.startDate,
+      copiedEnd: copied.dueDate,
+      completed: copied.completed,
+      childCount: copied.subTasks.length,
+      freshChildIds: copied.subTasks.every((child) => !source.subTasks.some((item) => item.id === child.id)),
+      childrenActive: copied.subTasks.every((child) => !child.completed && child.completedAt === null),
+    }
+  })()`, 'Ctrl-drag calendar task copy')
+  assert.deepEqual(ctrlCopiedTask, {
+    id: ctrlCopiedTask.id,
+    sourceStart: today,
+    copiedStart: singleMoveTarget,
+    copiedEnd: singleMoveTarget,
+    completed: false,
+    childCount: 8,
+    freshChildIds: true,
+    childrenActive: true,
+  })
+  await reloadRenderer(mainWindow)
+  await waitForRenderer(
+    mainWindow,
+    `Boolean(document.querySelector(
+      '[data-qa="calendar-task-segment"][data-task-id="${ctrlCopiedTask.id}"][data-task-start="${singleMoveTarget}"]',
+    )) && document.querySelector(
+      '[data-qa="calendar-task-segment"][data-task-id="qa-task-a"]',
+    )?.dataset.taskStart === ${JSON.stringify(today)}`,
+    'Ctrl-drag copy persistence without moving source',
+  )
+
   const multiOriginalStart = sameWeekStart
   const multiOriginalEnd = sharedFriday
   const multiMoveTarget = addDaysKey(today, 4)
@@ -4001,6 +4059,75 @@ app.whenReady().then(async () => {
       && !document.querySelector('[data-qa="template-modal"]')
       && document.activeElement === document.querySelector('[aria-label="반복 일정 닫기"]')`,
     'template panel, seeded card, and hidden create form',
+  )
+  const taskCountBeforeRailTemplateDrop = await runIn(
+    mainWindow,
+    `JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')?.tasks?.length ?? -1`,
+  )
+  const sourceTaskTemplateShape = await runIn(mainWindow, `(() => {
+    const task = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+      ?.tasks?.find((item) => item.id === 'qa-task-a')
+    if (!task) return null
+    const start = new Date(task.startDate + 'T00:00:00')
+    const end = new Date(task.dueDate + 'T00:00:00')
+    return {
+      note: task.note,
+      dueTime: task.dueTime,
+      tagId: task.tagId,
+      legacyColor: task.color,
+      durationDays: Math.round((end - start) / 86400000) + 1,
+      subTaskTitles: task.subTasks.map((subTask) => subTask.title),
+      scheduleType: task.scheduleType || 'normal',
+      businessDay: task.businessDay === true,
+    }
+  })()`)
+  assert.ok(sourceTaskTemplateShape, 'Template drop source task must exist')
+  assert.equal(
+    await runIn(
+      mainWindow,
+      `window.__daylineQa.dragAndDrop(
+        '[data-qa="calendar-task-segment"][data-task-id="qa-task-a"] [data-qa="calendar-task-date-drag"]',
+        '[data-qa="side-rail"]',
+      )`,
+    ),
+    true,
+  )
+  const railCopiedTemplate = await waitForRenderer(mainWindow, `(() => {
+    const store = JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+    const template = store?.taskTemplates?.find((item) => item.title === 'QA 상세 일정')
+    if (!template) return null
+    return {
+      id: template.id,
+      note: template.note,
+      dueTime: template.dueTime,
+      tagId: template.tagId,
+      legacyColor: template.legacyColor,
+      durationDays: template.durationDays,
+      subTaskTitles: template.subTaskTitles,
+      scheduleType: template.scheduleType,
+      businessDay: template.businessDay,
+      taskCount: store.tasks.length,
+      cardVisible: Boolean(document.querySelector(
+        '[data-qa="template-panel"] [data-template-id="' + CSS.escape(template.id) + '"]',
+      )),
+    }
+  })()`, 'calendar task dropped onto rail as template')
+  assert.deepEqual(railCopiedTemplate, {
+    id: railCopiedTemplate.id,
+    ...sourceTaskTemplateShape,
+    taskCount: taskCountBeforeRailTemplateDrop,
+    cardVisible: true,
+  })
+  await runIn(
+    mainWindow,
+    `document.querySelector('[aria-label="QA 상세 일정 삭제"]')?.click()`,
+  )
+  await waitForRenderer(
+    mainWindow,
+    `!document.querySelector('[data-template-id="${railCopiedTemplate.id}"]')
+      && JSON.parse(localStorage.getItem('dayline-browser-store-v1') || 'null')
+        ?.taskTemplates?.every((template) => template.id !== '${railCopiedTemplate.id}')`,
+    'rail-copied template cleanup',
   )
   assert.equal(
     await runIn(

@@ -17,6 +17,7 @@ import type {
 } from '../types'
 import { addDaysKey, isDateKey, todayKey } from '../domain/date'
 import { purgeExpired } from '../domain/tasks'
+import { normalizeTaskScheduleType } from '../domain/taskSchedule'
 
 const BROWSER_STORAGE_KEY = 'dayline-browser-store-v1'
 const TASK_COLORS = new Set<TaskColor>(['coral', 'violet', 'sage', 'blue', 'amber'])
@@ -51,7 +52,8 @@ export const LEGACY_TAG_ID_BY_COLOR: Record<TaskColor, string> = {
 
 const MUTABLE_TASK_FIELDS = [
   'title', 'note', 'startDate', 'dueDate', 'dueTime', 'color', 'tagId', 'position',
-  'completed', 'completedAt', 'deletedAt', 'previousCompleted', 'updatedAt',
+  'scheduleType', 'businessDay', 'completed', 'completedAt', 'deletedAt',
+  'previousCompleted', 'updatedAt',
 ] as const
 const MUTABLE_DAILY_NOTE_FIELDS = [
   'content', 'noteDate', 'completed', 'completedAt', 'pinned', 'pinnedStartDate',
@@ -59,7 +61,8 @@ const MUTABLE_DAILY_NOTE_FIELDS = [
 ] as const
 const MUTABLE_TAG_FIELDS = ['name', 'color', 'position', 'updatedAt'] as const
 const MUTABLE_TEMPLATE_FIELDS = [
-  'title', 'note', 'dueTime', 'tagId', 'legacyColor', 'durationDays', 'position', 'updatedAt',
+  'title', 'note', 'dueTime', 'tagId', 'legacyColor', 'durationDays',
+  'scheduleType', 'businessDay', 'position', 'updatedAt',
 ] as const
 
 export function createBuiltInTaskTags(timestamp = new Date().toISOString()): TaskTag[] {
@@ -173,6 +176,7 @@ function normalizeTask(
   const requestedStart = typeof raw.startDate === 'string' && isDateKey(raw.startDate) ? raw.startDate : dueDate
   const startDate = requestedStart <= dueDate ? requestedStart : dueDate
   const color = TASK_COLORS.has(raw.color as TaskColor) ? raw.color as TaskColor : 'coral'
+  const scheduleType = normalizeTaskScheduleType(raw.scheduleType)
   let completed = raw.completed === true
   const createdAt = timestamp(raw.createdAt, fallbackTimestamp)
   let subTasks = Array.isArray(raw.subTasks)
@@ -203,6 +207,9 @@ function normalizeTask(
       : null,
     color,
     tagId: normalizeTagId(raw, knownTagIds, color),
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && raw.businessDay === true,
     position: validPosition(raw.position, fallbackPosition),
     completed,
     completedAt,
@@ -259,6 +266,7 @@ function normalizeTemplate(
 ): TaskTemplate | null {
   if (!isRecord(raw) || typeof raw.id !== 'string' || typeof raw.title !== 'string' || !raw.title.trim()) return null
   const legacyColor = TASK_COLORS.has(raw.legacyColor as TaskColor) ? raw.legacyColor as TaskColor : 'coral'
+  const scheduleType = normalizeTaskScheduleType(raw.scheduleType)
   return {
     id: raw.id,
     title: raw.title.trim(),
@@ -272,6 +280,9 @@ function normalizeTemplate(
     subTaskTitles: Array.isArray(raw.subTaskTitles)
       ? raw.subTaskTitles.filter((title): title is string => typeof title === 'string' && Boolean(title.trim())).map((title) => title.trim())
       : [],
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && raw.businessDay === true,
     position: validPosition(raw.position, fallbackPosition),
     createdAt: timestamp(raw.createdAt, fallbackTimestamp),
     updatedAt: timestamp(raw.updatedAt, fallbackTimestamp),
@@ -635,15 +646,16 @@ export async function loadStore(): Promise<DaylineStore> {
 }
 
 export function saveStore(previousStore: DaylineStore, nextStore: DaylineStore): DaylineStore {
+  const safePreviousStore = normalizeStore(previousStore)
   const requestedTagIds = new Set(nextStore.taskTags.map((tag) => tag.id))
-  const protectedBuiltIns = previousStore.taskTags.filter((tag) => tag.builtIn && !requestedTagIds.has(tag.id))
+  const protectedBuiltIns = safePreviousStore.taskTags.filter((tag) => tag.builtIn && !requestedTagIds.has(tag.id))
   const safeStore = normalizeStore({
     ...nextStore,
     taskTags: [...nextStore.taskTags, ...protectedBuiltIns],
   })
-  const mutations = storeMutations(previousStore, safeStore)
+  const mutations = storeMutations(safePreviousStore, safeStore)
   if (window.dayline) return window.dayline.applyStoreMutations(mutations)
-  let currentStore = normalizeStore(previousStore)
+  let currentStore = safePreviousStore
   try {
     currentStore = normalizeStore(JSON.parse(localStorage.getItem(BROWSER_STORAGE_KEY) || 'null'))
   } catch {

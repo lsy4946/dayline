@@ -4,7 +4,7 @@ const { DatabaseSync } = require('node:sqlite')
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RETENTION_MS = 30 * DAY_MS
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 8
 const STORE_VERSION = 1
 const UPDATE_CONSENT_META_KEY = 'pending_update_consent_v1'
 const INSTALLED_RELEASE_HISTORY_META_KEY = 'installed_release_history_v1'
@@ -12,6 +12,9 @@ const MAX_UPDATE_VERSION_LENGTH = 128
 const MAX_UPDATE_RELEASE_NAME_LENGTH = 200
 const MAX_UPDATE_RELEASE_NOTES_LENGTH = 128 * 1024
 const TASK_COLORS = new Set(['coral', 'violet', 'sage', 'blue', 'amber'])
+const TASK_SCHEDULE_TYPES = new Set([
+  'normal', 'monthly-date', 'monthly-weekday', 'monthly-first', 'monthly-last',
+])
 const DEFAULT_APP_SETTINGS = Object.freeze({
   sidebarSplit: 50,
   widgetSplit: 50,
@@ -45,6 +48,8 @@ const TASK_PATCHABLE_FIELDS = [
   'dueTime',
   'color',
   'tagId',
+  'scheduleType',
+  'businessDay',
   'position',
   'completed',
   'completedAt',
@@ -60,6 +65,8 @@ const TASK_COLUMN_BY_FIELD = {
   dueTime: 'due_time',
   color: 'color',
   tagId: 'tag_id',
+  scheduleType: 'schedule_type',
+  businessDay: 'business_day',
   position: 'position',
   completed: 'completed',
   completedAt: 'completed_at',
@@ -99,7 +106,7 @@ const TAG_COLUMN_BY_FIELD = {
 }
 const TEMPLATE_PATCHABLE_FIELDS = [
   'title', 'note', 'dueTime', 'tagId', 'legacyColor', 'durationDays',
-  'subTaskTitles', 'position', 'updatedAt',
+  'subTaskTitles', 'scheduleType', 'businessDay', 'position', 'updatedAt',
 ]
 const TEMPLATE_COLUMN_BY_FIELD = {
   title: 'title',
@@ -109,6 +116,8 @@ const TEMPLATE_COLUMN_BY_FIELD = {
   legacyColor: 'legacy_color',
   durationDays: 'duration_days',
   subTaskTitles: 'sub_task_titles_json',
+  scheduleType: 'schedule_type',
+  businessDay: 'business_day',
   position: 'position',
   updatedAt: 'updated_at',
 }
@@ -516,6 +525,7 @@ function sanitizeTaskTemplate(template, now = new Date(), fallbackPosition = 0) 
   if (typeof template.title !== 'string' || template.title.trim().length < 1) return null
   const nowIso = now.toISOString()
   const legacyColor = TASK_COLORS.has(template.legacyColor) ? template.legacyColor : 'coral'
+  const scheduleType = TASK_SCHEDULE_TYPES.has(template.scheduleType) ? template.scheduleType : 'normal'
   return {
     id: template.id,
     title: template.title.trim().slice(0, 240),
@@ -536,6 +546,9 @@ function sanitizeTaskTemplate(template, now = new Date(), fallbackPosition = 0) 
         .slice(0, 500)
         .map((title) => title.trim().slice(0, 240))
       : [],
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && template.businessDay === true,
     position: validPosition(template.position, fallbackPosition),
     createdAt: normalizeTimestamp(template.createdAt, nowIso),
     updatedAt: normalizeTimestamp(template.updatedAt, nowIso),
@@ -570,6 +583,7 @@ function sanitizeTask(task, now = new Date(), fallbackPosition = 0) {
   const validStartDate = isDateKey(task.startDate) ? task.startDate : task.dueDate
   if (validStartDate > task.dueDate) return null
   const startDate = validStartDate
+  const scheduleType = TASK_SCHEDULE_TYPES.has(task.scheduleType) ? task.scheduleType : 'normal'
   let completed = Boolean(task.completed)
   let completedAt = completed && isIsoTimestamp(task.completedAt)
     ? new Date(task.completedAt).toISOString()
@@ -612,6 +626,9 @@ function sanitizeTask(task, now = new Date(), fallbackPosition = 0) {
       : Object.prototype.hasOwnProperty.call(task, 'tagId')
         ? null
         : LEGACY_TAG_ID_BY_COLOR[TASK_COLORS.has(task.color) ? task.color : 'coral'],
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && task.businessDay === true,
     position: validPosition(task.position, fallbackPosition),
     completed,
     completedAt,
@@ -671,6 +688,8 @@ function rowToTask(row, subTasks = []) {
     dueTime: row.due_time,
     color: row.color,
     tagId: row.tag_id,
+    scheduleType: TASK_SCHEDULE_TYPES.has(row.schedule_type) ? row.schedule_type : 'normal',
+    businessDay: row.business_day === 1,
     position: row.position,
     completed: row.completed === 1,
     completedAt: row.completed_at,
@@ -752,6 +771,8 @@ function rowToTaskTemplate(row) {
     legacyColor: row.legacy_color,
     durationDays: row.duration_days,
     subTaskTitles,
+    scheduleType: TASK_SCHEDULE_TYPES.has(row.schedule_type) ? row.schedule_type : 'normal',
+    businessDay: row.business_day === 1,
     position: row.position,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -759,7 +780,7 @@ function rowToTaskTemplate(row) {
 }
 
 function sqliteValue(field, value) {
-  if (field === 'completed' || field === 'pinned') return value ? 1 : 0
+  if (field === 'completed' || field === 'pinned' || field === 'businessDay') return value ? 1 : 0
   if (field === 'previousCompleted') return value == null ? null : value ? 1 : 0
   if (field === 'subTaskTitles' || field === 'viewPositions') return JSON.stringify(value)
   return value
@@ -1196,6 +1217,50 @@ function createSchema(database, appliedAt) {
       database.exec('PRAGMA user_version = 6')
     })
   }
+
+  if (currentVersion < 7) {
+    inTransaction(database, () => {
+      if (!tableHasColumn(database, 'tasks', 'schedule_type')) {
+        database.exec(`
+          ALTER TABLE tasks ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'normal'
+          CHECK (schedule_type IN ('normal', 'monthly-date', 'monthly-weekday', 'monthly-first', 'monthly-last'))
+        `)
+      }
+      if (!tableHasColumn(database, 'tasks', 'business_day')) {
+        database.exec(`
+          ALTER TABLE tasks ADD COLUMN business_day INTEGER NOT NULL DEFAULT 0
+          CHECK (business_day IN (0, 1))
+        `)
+      }
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (7, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 7')
+    })
+  }
+
+  if (currentVersion < 8) {
+    inTransaction(database, () => {
+      if (!tableHasColumn(database, 'task_templates', 'schedule_type')) {
+        database.exec(`
+          ALTER TABLE task_templates ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'normal'
+          CHECK (schedule_type IN ('normal', 'monthly-date', 'monthly-weekday', 'monthly-first', 'monthly-last'))
+        `)
+      }
+      if (!tableHasColumn(database, 'task_templates', 'business_day')) {
+        database.exec(`
+          ALTER TABLE task_templates ADD COLUMN business_day INTEGER NOT NULL DEFAULT 0
+          CHECK (business_day IN (0, 1))
+        `)
+      }
+      database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at) VALUES (8, ?)
+        ON CONFLICT(version) DO NOTHING
+      `).run(appliedAt)
+      database.exec('PRAGMA user_version = 8')
+    })
+  }
 }
 
 function insertSubTask(database, taskId, subTask, position) {
@@ -1222,11 +1287,15 @@ function knownTagId(database, profileId, value) {
 }
 
 function insertTask(database, profileId, task) {
+  const scheduleType = TASK_SCHEDULE_TYPES.has(task.scheduleType) ? task.scheduleType : 'normal'
+  const businessDay = (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+    && task.businessDay === true
   const inserted = Number(database.prepare(`
     INSERT INTO tasks (
       id, profile_id, title, note, start_date, due_date, due_time, color, tag_id, position,
-      completed, completed_at, deleted_at, previous_completed, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      schedule_type, business_day, completed, completed_at, deleted_at, previous_completed,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     task.id,
@@ -1239,6 +1308,8 @@ function insertTask(database, profileId, task) {
     task.color,
     knownTagId(database, profileId, task.tagId),
     task.position,
+    scheduleType,
+    businessDay ? 1 : 0,
     task.completed ? 1 : 0,
     task.completedAt,
     task.deletedAt,
@@ -1304,11 +1375,15 @@ function insertTaskTag(database, profileId, tag, replaceMutable = false) {
 }
 
 function insertTaskTemplate(database, profileId, template) {
+  const scheduleType = TASK_SCHEDULE_TYPES.has(template.scheduleType) ? template.scheduleType : 'normal'
+  const businessDay = (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+    && template.businessDay === true
   return Number(database.prepare(`
     INSERT INTO task_templates (
       id, profile_id, title, note, due_time, tag_id, legacy_color,
-      duration_days, sub_task_titles_json, position, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      duration_days, sub_task_titles_json, schedule_type, business_day,
+      position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).run(
     template.id,
@@ -1320,6 +1395,8 @@ function insertTaskTemplate(database, profileId, template) {
     template.legacyColor,
     template.durationDays,
     JSON.stringify(template.subTaskTitles),
+    scheduleType,
+    businessDay ? 1 : 0,
     template.position,
     template.createdAt,
     template.updatedAt,

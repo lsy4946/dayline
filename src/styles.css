@@ -201,6 +201,7 @@ button:disabled {
 }
 
 .side-rail {
+  position: relative;
   grid-column: 1;
   grid-row: 1;
   display: flex;
@@ -210,6 +211,40 @@ button:disabled {
   padding: 12px 12px 18px;
   background: #26352f;
   color: #dfe7e2;
+  transition: box-shadow 140ms ease, background 140ms ease;
+}
+
+.side-rail[data-calendar-task-dragging="true"] {
+  box-shadow: inset 0 0 0 2px rgba(180, 222, 198, 0.42);
+}
+
+.side-rail[data-calendar-task-dragging="true"] [data-rail-action="templates"] {
+  background: #eaf5ed;
+  color: var(--green);
+  box-shadow: 0 0 0 3px rgba(180, 222, 198, 0.2), 0 8px 22px rgba(0, 0, 0, 0.16);
+}
+
+.side-rail[data-calendar-task-dragging="true"] [data-rail-action="templates"]::after {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: -22px;
+  width: 62px;
+  padding: 3px 2px;
+  transform: translateX(-50%);
+  border-radius: 6px;
+  background: #eaf5ed;
+  color: #315b45;
+  content: "양식 보관";
+  font-size: var(--font-8, 8px);
+  font-weight: 800;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.side-rail[data-task-template-drop-hover="true"] {
+  background: #30483d;
+  box-shadow: inset 0 0 0 3px rgba(202, 235, 216, 0.72);
 }
 
 .side-rail [hidden] { display: none !important; }
@@ -480,10 +515,13 @@ button:disabled {
 
 .calendar-toolbar {
   display: flex;
-  flex: 0 0 51px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px 0 11px;
+  gap: 6px 12px;
+  min-height: 51px;
+  padding: 7px 14px 7px 11px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -512,6 +550,8 @@ button:disabled {
 
 .calendar-hint {
   gap: 14px;
+  flex: 0 0 auto;
+  margin-left: auto;
   color: #89948e;
   font-size: var(--font-10, 10px);
   font-weight: 650;
@@ -2145,7 +2185,13 @@ button:disabled {
   border-top: 1px solid var(--line);
 }
 
-.modal-footer > span { color: #9aa39e; font-size: var(--font-9, 9px); }
+.modal-footer > span {
+  flex: 1;
+  min-width: 0;
+  color: #89958e;
+  font-size: var(--font-9, 9px);
+  line-height: 1.5;
+}
 .modal-footer > div { display: flex; gap: 7px; }
 
 .recovery-layer {
@@ -3366,6 +3412,23 @@ input[type="color"]:focus-visible {
   animation: fade-in 180ms ease both;
 }
 
+.rail-flyout[data-calendar-task-dragging="true"]::after {
+  position: absolute;
+  z-index: 8;
+  inset: 10px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--green) 46%, white);
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--green-soft) 90%, rgba(255, 255, 255, 0.72));
+  color: var(--green-deep);
+  content: "여기에 놓아 반복 일정 양식으로 보관";
+  font-size: var(--font-12, 12px);
+  font-weight: 800;
+  text-align: center;
+  pointer-events: none;
+}
+
 .update-session-card {
   position: relative;
   display: flex;
@@ -3720,12 +3783,14 @@ input[type="color"]:focus-visible {
 
 .calendar-cell > *:not(.calendar-task-overflow) { position: relative; z-index: 1; }
 .range-selection-summary {
-  max-width: 190px;
+  max-width: 100%;
+  min-height: 24px;
   padding: 3px 6px;
   border-radius: 7px;
   background: var(--green-soft);
   color: var(--green);
   font-weight: 800;
+  line-height: 1.35;
   white-space: nowrap;
 }
 
@@ -4032,6 +4097,85 @@ input[type="color"]:focus-visible {
   background: var(--green-soft);
   color: var(--green-deep);
 }
+
+.schedule-picker {
+  margin: 15px 0 0;
+  padding: 13px;
+  border: 1px solid #dce4de;
+  border-radius: 14px;
+  background: #f7f9f6;
+}
+
+.schedule-picker legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  color: #58645e;
+  font-size: var(--font-11, 11px);
+  font-weight: 780;
+}
+
+.schedule-picker-options {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.schedule-picker-options button {
+  min-width: 0;
+  min-height: 35px;
+  padding: 5px 6px;
+  border: 1px solid #dfe5e0;
+  border-radius: 9px;
+  background: white;
+  color: #6d7872;
+  font-size: var(--font-9, 9px);
+  font-weight: 760;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.schedule-picker-options button:hover,
+.schedule-picker-options button:focus-visible {
+  border-color: color-mix(in srgb, var(--green) 28%, #dce4de);
+  background: color-mix(in srgb, var(--green-soft) 45%, white);
+}
+
+.schedule-picker-options button.is-selected {
+  border-color: color-mix(in srgb, var(--green) 42%, #dce4de);
+  background: var(--green-soft);
+  color: var(--green-deep);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 9%, transparent);
+}
+
+.business-day-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 45px;
+  margin-top: 10px;
+  padding: 8px 9px;
+  border: 1px solid #dfe5e0;
+  border-radius: 11px;
+  background: white;
+  color: #647069;
+  text-align: left;
+  cursor: pointer;
+}
+
+.business-day-toggle > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.business-day-toggle strong { color: #58645e; font-size: var(--font-10, 10px); }
+.business-day-toggle small { color: #929d96; font-size: var(--font-8, 8px); line-height: 1.4; }
+.business-day-toggle[aria-checked="true"] { border-color: #cfe0d5; background: #f4f9f5; }
+.business-day-toggle[aria-checked="true"] .switch-track { background: var(--green); }
+.business-day-toggle[aria-checked="true"] .switch-track > span { transform: translateX(12px); }
 
 /* Compact widget split view */
 .widget-split-body {
@@ -4474,7 +4618,7 @@ input[type="color"]:focus-visible {
 @media (max-width: 1100px) {
   .calendar-workspace { padding-inline: 15px; }
   .calendar-hint { gap: 7px; }
-  .range-selection-summary { max-width: 142px; overflow: hidden; text-overflow: ellipsis; }
+  .range-selection-summary { max-width: 100%; }
   .day-panel { padding-inline: 14px; }
   .month-jump { margin-left: 3px; padding-inline: 4px; }
   .month-jump select { padding-right: 13px; }

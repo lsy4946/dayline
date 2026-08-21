@@ -484,8 +484,8 @@ namespace DaylineUpdateHelper
         {
             string from = ReadOption("from-version");
             string to = ReadOption("to-version");
-            if (String.IsNullOrWhiteSpace(from)) from = "0.3.41";
-            if (String.IsNullOrWhiteSpace(to)) to = preview ? "0.3.42" : "새 버전";
+            if (String.IsNullOrWhiteSpace(from)) from = "0.4.0";
+            if (String.IsNullOrWhiteSpace(to)) to = preview ? "0.4.1" : "새 버전";
             if (!from.StartsWith("v", StringComparison.OrdinalIgnoreCase)) from = "v" + from;
             if (!to.StartsWith("v", StringComparison.OrdinalIgnoreCase) && to != "새 버전") to = "v" + to;
             return from + "  →  " + to;

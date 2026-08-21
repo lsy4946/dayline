@@ -3,6 +3,7 @@ import type { DaylineStore, StoreMutation, Task, TaskTag, TaskTemplate } from '.
 import { createBuiltInTaskTags, DEFAULT_APP_SETTINGS, saveStore } from '../lib/storage'
 import {
   advanceTaskState,
+  copyTaskToDate,
   isRecoverable,
   moveTaskRange,
   purgeExpired,
@@ -264,6 +265,30 @@ describe('inclusive task ranges', () => {
     expect(moveTaskRange(tasks, rangeTask.id, '2026-02-30')).toBe(tasks)
     expect(tasks[0]).toBe(rangeTask)
     expect(deletedTasks[0]).toBe(deleted)
+  })
+
+  it('copies a range with fresh IDs and resets completion state', () => {
+    const ids = ['copied-task', 'copied-child']
+    const copied = copyTaskToDate({
+      ...rangeTask,
+      scheduleType: 'monthly-last',
+      businessDay: true,
+      completed: true,
+      completedAt: '2026-08-12T03:00:00.000Z',
+      subTasks: [{ ...subTasks[0], completed: true, completedAt: '2026-08-12T02:00:00.000Z' }],
+    }, '2026-09-20', 7, new Date('2026-09-01T05:00:00.000Z'), () => ids.shift()!)
+
+    expect(copied).toMatchObject({
+      id: 'copied-task',
+      startDate: '2026-09-20',
+      dueDate: '2026-09-22',
+      position: 7,
+      scheduleType: 'monthly-last',
+      businessDay: true,
+      completed: false,
+      completedAt: null,
+    })
+    expect(copied?.subTasks).toMatchObject([{ id: 'copied-child', completed: false, completedAt: null }])
   })
 })
 describe('30 day recovery window', () => {

@@ -4,8 +4,8 @@ const path = require('node:path')
 
 const projectDir = path.resolve(__dirname, '..')
 const qaRoot = path.join(projectDir, 'qa', 'local-update')
-const clientVersion = '0.3.41'
-const updateVersion = '0.3.42'
+const clientVersion = '0.4.0'
+const updateVersion = '0.4.1'
 const port = 43127
 const feedUrl = `http://127.0.0.1:${port}`
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf8'))

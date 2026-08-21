@@ -1,11 +1,10 @@
 import type { Task } from '../types'
 import {
   addDaysKey,
-  dateRangeContains,
-  dateRangesOverlap,
   inclusiveDateKeys,
   isDateKey,
 } from './date'
+import { taskOccurrenceRanges } from './taskSchedule'
 
 export const RETENTION_DAYS = 30
 export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
@@ -45,11 +44,11 @@ export function sortTasks(tasks: Task[]): Task[] {
 }
 
 export function taskOccursOnDate(task: Task, dateKey: string): boolean {
-  return dateRangeContains(task.startDate, task.dueDate, dateKey)
+  return taskOccurrenceRanges(task, dateKey, dateKey).length > 0
 }
 
 export function taskOverlapsRange(task: Task, startDate: string, endDate: string): boolean {
-  return dateRangesOverlap(task.startDate, task.dueDate, startDate, endDate)
+  return taskOccurrenceRanges(task, startDate, endDate).length > 0
 }
 
 export function moveTaskRange(
@@ -71,6 +70,41 @@ export function moveTaskRange(
     updatedAt: now.toISOString(),
   }
   return tasks.map((task) => task === target ? moved : task)
+}
+
+export function copyTaskToDate(
+  task: Task,
+  targetStart: string,
+  position: number,
+  now = new Date(),
+  createId: () => string = () => crypto.randomUUID(),
+): Task | null {
+  if (task.deletedAt || !isDateKey(targetStart)) return null
+  const durationDays = inclusiveDateKeys(task.startDate, task.dueDate).length
+  if (durationDays === 0) return null
+
+  const timestamp = now.toISOString()
+  return {
+    ...task,
+    id: createId(),
+    startDate: targetStart,
+    dueDate: addDaysKey(targetStart, durationDays - 1),
+    position,
+    completed: false,
+    completedAt: null,
+    deletedAt: null,
+    previousCompleted: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    subTasks: task.subTasks.map((subTask) => ({
+      ...subTask,
+      id: createId(),
+      completed: false,
+      completedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })),
+  }
 }
 
 export function reorderPositioned<T extends { id: string; position: number; updatedAt: string }>(

@@ -1,5 +1,6 @@
-import type { SubTask, SubTaskPatch, Task, TaskColor, TaskTemplate } from '../types'
-import { addDaysKey } from './date'
+import type { SubTask, SubTaskPatch, Task, TaskColor, TaskScheduleType, TaskTemplate } from '../types'
+import { addDaysKey, inclusiveDateKeys } from './date'
+import { normalizeTaskScheduleType } from './taskSchedule'
 
 export interface TaskDraft {
   title: string
@@ -9,6 +10,8 @@ export interface TaskDraft {
   dueTime: string | null
   color: TaskColor
   tagId: string | null
+  scheduleType?: TaskScheduleType
+  businessDay?: boolean
   subTasks: SubTask[]
 }
 
@@ -60,6 +63,12 @@ export function getTaskEditChanges(
     .filter((subTask) => !nextIds.has(subTask.id))
     .map((subTask) => subTask.id)
   const hasSubTaskChanges = created.length > 0 || patched.length > 0 || deletedIds.length > 0
+  const nextScheduleType = normalizeTaskScheduleType(draft.scheduleType)
+  const previousScheduleType = normalizeTaskScheduleType(task.scheduleType)
+  const nextBusinessDay = (nextScheduleType === 'monthly-first' || nextScheduleType === 'monthly-last')
+    && draft.businessDay === true
+  const previousBusinessDay = (previousScheduleType === 'monthly-first' || previousScheduleType === 'monthly-last')
+    && task.businessDay === true
 
   return {
     draft: {
@@ -70,6 +79,8 @@ export function getTaskEditChanges(
       ...(draft.dueTime !== task.dueTime ? { dueTime: draft.dueTime } : {}),
       ...(draft.color !== task.color ? { color: draft.color } : {}),
       ...(draft.tagId !== task.tagId ? { tagId: draft.tagId } : {}),
+      ...(nextScheduleType !== previousScheduleType ? { scheduleType: nextScheduleType } : {}),
+      ...(nextBusinessDay !== previousBusinessDay ? { businessDay: nextBusinessDay } : {}),
     },
     ...(hasSubTaskChanges ? { subTasks: { created, patched, deletedIds } } : {}),
     ...(completed !== task.completed
@@ -86,6 +97,7 @@ export function createTaskFromTemplate(
   createId: () => string = () => crypto.randomUUID(),
 ): Task {
   const timestamp = now.toISOString()
+  const scheduleType = normalizeTaskScheduleType(template.scheduleType)
   return {
     id: createId(),
     title: template.title,
@@ -95,6 +107,9 @@ export function createTaskFromTemplate(
     dueTime: template.dueTime,
     color: template.legacyColor,
     tagId: template.tagId,
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && template.businessDay === true,
     position,
     completed: false,
     completedAt: null,
@@ -110,6 +125,32 @@ export function createTaskFromTemplate(
       createdAt: timestamp,
       updatedAt: timestamp,
     })),
+  }
+}
+
+export function createTaskTemplateFromTask(
+  task: Task,
+  position: number,
+  now = new Date(),
+  createId: () => string = () => crypto.randomUUID(),
+): TaskTemplate {
+  const timestamp = now.toISOString()
+  const scheduleType = normalizeTaskScheduleType(task.scheduleType)
+  return {
+    id: createId(),
+    title: task.title,
+    note: task.note,
+    dueTime: task.dueTime,
+    tagId: task.tagId,
+    legacyColor: task.color,
+    durationDays: Math.max(1, inclusiveDateKeys(task.startDate, task.dueDate).length),
+    subTaskTitles: task.subTasks.map((subTask) => subTask.title),
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && task.businessDay === true,
+    position,
+    createdAt: timestamp,
+    updatedAt: timestamp,
   }
 }
 

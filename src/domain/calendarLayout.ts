@@ -1,6 +1,7 @@
 import type { Task } from '../types'
 import { addDaysKey, isDateKey } from './date'
 import { sortTasks, taskOccursOnDate, taskOverlapsRange } from './tasks'
+import { taskOccurrenceRanges } from './taskSchedule'
 
 export interface CalendarTaskSegment {
   taskId: string
@@ -10,6 +11,8 @@ export interface CalendarTaskSegment {
   endColumn: number
   segmentStart: string
   segmentEnd: string
+  occurrenceStart: string
+  occurrenceEnd: string
   continuesBefore: boolean
   continuesAfter: boolean
 }
@@ -47,6 +50,11 @@ interface CalendarTaskRange {
   end: string
 }
 
+interface CalendarTaskOccurrence extends CalendarTaskRange {
+  key: string
+  task: Task
+}
+
 function rangesOverlap(left: CalendarTaskRange, right: CalendarTaskRange) {
   return left.start <= right.end && right.start <= left.end
 }
@@ -66,25 +74,33 @@ export function layoutCalendarTaskSegments(
     : 3
   const gridEnd = addDaysKey(gridStart, dayCount - 1)
   const relevantTasks = sortTasks(tasks.filter((task) => taskOverlapsRange(task, gridStart, gridEnd)))
+  const occurrences: CalendarTaskOccurrence[] = relevantTasks.flatMap((task) =>
+    taskOccurrenceRanges(task, gridStart, gridEnd).map((range) => ({
+      key: `${task.id}:${range.startDate}`,
+      task,
+      start: range.startDate,
+      end: range.dueDate,
+    })),
+  )
   const segments: CalendarTaskSegment[] = []
   const visibleTaskIdsByDate = new Map<string, Set<string>>()
   const occupiedRangesByLane: CalendarTaskRange[][] = Array.from(
     { length: safeMaxLanes },
     () => [],
   )
-  const laneByTaskId = new Map<string, number>()
+  const laneByOccurrenceKey = new Map<string, number>()
 
-  for (const task of relevantTasks) {
+  for (const occurrence of occurrences) {
     const clippedRange = {
-      start: laterKey(task.startDate, gridStart),
-      end: earlierKey(task.dueDate, gridEnd),
+      start: laterKey(occurrence.start, gridStart),
+      end: earlierKey(occurrence.end, gridEnd),
     }
     const lane = occupiedRangesByLane.findIndex((ranges) =>
       ranges.every((range) => !rangesOverlap(range, clippedRange)),
     )
     if (lane < 0) continue
     occupiedRangesByLane[lane].push(clippedRange)
-    laneByTaskId.set(task.id, lane)
+    laneByOccurrenceKey.set(occurrence.key, lane)
   }
 
   for (let weekRow = 0; weekRow < Math.ceil(dayCount / 7); weekRow += 1) {
@@ -92,12 +108,13 @@ export function layoutCalendarTaskSegments(
     const remainingDays = dayCount - weekRow * 7
     const weekEnd = addDaysKey(weekStart, Math.min(6, remainingDays - 1))
 
-    for (const task of relevantTasks) {
-      const lane = laneByTaskId.get(task.id)
+    for (const occurrence of occurrences) {
+      const { task } = occurrence
+      const lane = laneByOccurrenceKey.get(occurrence.key)
       if (lane == null) continue
-      if (!taskOverlapsRange(task, weekStart, weekEnd)) continue
-      const segmentStart = laterKey(task.startDate, weekStart)
-      const segmentEnd = earlierKey(task.dueDate, weekEnd)
+      if (!rangesOverlap(occurrence, { start: weekStart, end: weekEnd })) continue
+      const segmentStart = laterKey(occurrence.start, weekStart)
+      const segmentEnd = earlierKey(occurrence.end, weekEnd)
 
       const startColumn = columnForDate(weekStart, segmentStart)
       const endColumn = columnForDate(weekStart, segmentEnd)
@@ -110,8 +127,10 @@ export function layoutCalendarTaskSegments(
         endColumn,
         segmentStart,
         segmentEnd,
-        continuesBefore: task.startDate < segmentStart,
-        continuesAfter: task.dueDate > segmentEnd,
+        occurrenceStart: occurrence.start,
+        occurrenceEnd: occurrence.end,
+        continuesBefore: occurrence.start < segmentStart,
+        continuesAfter: occurrence.end > segmentEnd,
       }
       segments.push(segment)
 

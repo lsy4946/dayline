@@ -19,6 +19,8 @@ function makeTask(overrides = {}) {
     dueTime: null,
     color: 'coral',
     tagId: 'builtin-coral',
+    scheduleType: 'normal',
+    businessDay: false,
     position: 0,
     completed: false,
     completedAt: null,
@@ -505,7 +507,7 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   let store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 6)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 8)
   assert.deepEqual(store.tasks.map((task) => task.id), ['v1-task'])
   assert.deepEqual(store.tasks[0].subTasks, [])
   assert.equal(store.tasks[0].startDate, store.tasks[0].dueDate)
@@ -526,10 +528,12 @@ test('upgrades an existing v1 SQLite database without duplicates or demo data', 
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 6`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 7`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 8`).get().count, 1)
   inspected.close()
 })
 
-test('upgrades a v2 database to v6 without demos and assigns deterministic ranges, tags, and positions', (t) => {
+test('upgrades a v2 database to v8 without demos and assigns deterministic ranges, tags, and positions', (t) => {
   const paths = tempPaths(t)
   const sqlite = new DatabaseSync(paths.databasePath)
   sqlite.exec(`
@@ -593,7 +597,7 @@ test('upgrades a v2 database to v6 without demos and assigns deterministic range
 
   const upgraded = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   const store = upgraded.readStore()
-  assert.equal(upgraded.readDiagnostics().schemaVersion, 6)
+  assert.equal(upgraded.readDiagnostics().schemaVersion, 8)
   assert.deepEqual(store.tasks.map(({ id, position }) => ({ id, position })), [
     { id: 'v2-first', position: 0 },
     { id: 'v2-later', position: 1 },
@@ -603,6 +607,10 @@ test('upgrades a v2 database to v6 without demos and assigns deterministic range
     { startDate: '2026-09-12', dueDate: '2026-09-12' },
   ])
   assert.deepEqual(store.tasks.map((task) => task.tagId), ['builtin-coral', 'builtin-blue'])
+  assert.deepEqual(store.tasks.map(({ scheduleType, businessDay }) => ({ scheduleType, businessDay })), [
+    { scheduleType: 'normal', businessDay: false },
+    { scheduleType: 'normal', businessDay: false },
+  ])
   assert.deepEqual(
     store.dailyNotes.filter((note) => note.noteDate === '2026-09-09').map(({ id, position }) => ({ id, position })),
     [{ id: 'note-a', position: 0 }, { id: 'note-b', position: 1 }],
@@ -651,6 +659,9 @@ test('upgrades a v4 database with safe defaults for week scrolling and pin histo
     ALTER TABLE daily_notes DROP COLUMN pinned_start_date;
     ALTER TABLE app_settings DROP COLUMN calendar_week_scroll;
     ALTER TABLE daily_notes DROP COLUMN pinned;
+    ALTER TABLE task_templates DROP COLUMN business_day;
+    ALTER TABLE task_templates DROP COLUMN schedule_type;
+    DELETE FROM schema_migrations WHERE version = 8;
     DELETE FROM schema_migrations WHERE version = 6;
     DELETE FROM schema_migrations WHERE version = 5;
     PRAGMA user_version = 4;
@@ -659,12 +670,14 @@ test('upgrades a v4 database with safe defaults for week scrolling and pin histo
 
   database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
   const upgraded = database.readStore()
-  assert.equal(database.readDiagnostics().schemaVersion, 6)
+  assert.equal(database.readDiagnostics().schemaVersion, 8)
   assert.equal(upgraded.settings.calendarWeekScroll, false)
   assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).pinned, false)
   assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).pinnedStartDate, null)
   assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).pinnedEndDate, null)
   assert.deepEqual(upgraded.dailyNotes.find((item) => item.id === note.id).viewPositions, {})
+  assert.ok(upgraded.taskTemplates.every((template) => template.scheduleType === 'normal'))
+  assert.ok(upgraded.taskTemplates.every((template) => template.businessDay === false))
   assert.equal(upgraded.dailyNotes.find((item) => item.id === note.id).content, note.content)
   database.close()
 
@@ -674,8 +687,12 @@ test('upgrades a v4 database with safe defaults for week scrolling and pin histo
   assert.ok(inspected.prepare(`PRAGMA table_info(daily_notes)`).all().some((column) => column.name === 'pinned_start_date'))
   assert.ok(inspected.prepare(`PRAGMA table_info(daily_notes)`).all().some((column) => column.name === 'pinned_end_date'))
   assert.ok(inspected.prepare(`PRAGMA table_info(daily_notes)`).all().some((column) => column.name === 'view_positions_json'))
+  assert.ok(inspected.prepare(`PRAGMA table_info(task_templates)`).all().some((column) => column.name === 'schedule_type'))
+  assert.ok(inspected.prepare(`PRAGMA table_info(task_templates)`).all().some((column) => column.name === 'business_day'))
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5`).get().count, 1)
   assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 6`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 7`).get().count, 1)
+  assert.equal(inspected.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 8`).get().count, 1)
   inspected.close()
 })
 
@@ -764,6 +781,25 @@ test('parent completion scales without per-child IPC mutations', (t) => {
   assert.equal(store.tasks[0].subTasks.length, 150)
   assert.equal(store.tasks[0].subTasks.every((subTask) => subTask.completed), true)
   assert.equal(store.tasks[0].completed, true)
+  database.close()
+})
+
+test('persists and patches monthly schedule rules', (t) => {
+  const paths = tempPaths(t)
+  fs.writeFileSync(paths.legacyJsonPath, JSON.stringify({ version: 1, tasks: [] }))
+  const database = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
+  const task = makeTask({ scheduleType: 'monthly-first', businessDay: true })
+  let store = database.applyStoreMutations([{ type: 'task:create', task }])
+  assert.equal(store.tasks[0].scheduleType, 'monthly-first')
+  assert.equal(store.tasks[0].businessDay, true)
+
+  store = database.applyStoreMutations([{
+    type: 'task:patch',
+    id: task.id,
+    changes: { scheduleType: 'monthly-weekday', businessDay: false },
+  }])
+  assert.equal(store.tasks[0].scheduleType, 'monthly-weekday')
+  assert.equal(store.tasks[0].businessDay, false)
   database.close()
 })
 
@@ -921,6 +957,8 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
     legacyColor: 'sage',
     durationDays: 5,
     subTaskTitles: ['준비', '실행'],
+    scheduleType: 'monthly-first',
+    businessDay: true,
     position: 0,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -985,6 +1023,8 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
         title: '수정한 기간',
         durationDays: 0,
         subTaskTitles: ['한 단계'],
+        scheduleType: 'monthly-last',
+        businessDay: true,
         updatedAt: '2026-09-09T04:11:00.000Z',
       },
     },
@@ -993,6 +1033,8 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
   assert.equal(store.taskTemplates[0].title, '수정한 기간')
   assert.equal(store.taskTemplates[0].durationDays, 1)
   assert.deepEqual(store.taskTemplates[0].subTaskTitles, ['한 단계'])
+  assert.equal(store.taskTemplates[0].scheduleType, 'monthly-last')
+  assert.equal(store.taskTemplates[0].businessDay, true)
   database.close()
 
   const reopened = createDaylineDatabase({ ...paths, now: () => new Date(FIXED_NOW) })
@@ -1000,6 +1042,8 @@ test('persists reordering, editable built-ins, custom tags, clamped settings, an
   assert.equal(store.taskTags.find((tag) => tag.id === 'builtin-coral').name, '중요')
   assert.equal(store.taskTags.find((tag) => tag.id === 'custom-focus').color, '#654321')
   assert.equal(store.taskTemplates[0].durationDays, 1)
+  assert.equal(store.taskTemplates[0].scheduleType, 'monthly-last')
+  assert.equal(store.taskTemplates[0].businessDay, true)
   assert.equal(store.settings.calendarWeekScroll, true)
 
   store = reopened.applyStoreMutations([{ type: 'tag:delete', id: 'custom-focus' }])
@@ -1174,7 +1218,7 @@ test('records cached update consent and reconciles an exact installed target off
   assert.equal(inspected.prepare(`
     SELECT COUNT(*) AS count FROM app_meta WHERE key = 'installed_release_history_v1'
   `).get().count, 1)
-  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 6)
+  assert.equal(inspected.prepare('PRAGMA user_version').get().user_version, 8)
   inspected.close()
 })
 

@@ -158,9 +158,9 @@ test('keeps the public app version stable while identifying the Windows rebuild 
   const projectDir = path.join(__dirname, '..')
   const packageJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf8'))
 
-  assert.equal(packageJson.version, '0.3.41')
-  assert.equal(packageJson.build.buildNumber, '2')
-  assert.equal(`${packageJson.version}.${packageJson.build.buildNumber}`, '0.3.41.2')
+  assert.equal(packageJson.version, '0.4.0')
+  assert.equal(packageJson.build.buildNumber, '1')
+  assert.equal(`${packageJson.version}.${packageJson.build.buildNumber}`, '0.4.0.1')
 })
 
 test('unsupported controller never invokes provider operations', async () => {

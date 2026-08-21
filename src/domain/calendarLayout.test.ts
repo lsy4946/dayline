@@ -188,4 +188,25 @@ describe('calendar task segment layout', () => {
     expect(layout.dayCounts['2026-08-03']).toEqual({ total: 1, visible: 0, hidden: 1 })
     expect(layout.dayCounts['2026-08-15']).toEqual({ total: 1, visible: 0, hidden: 1 })
   })
+
+  it('lays out each monthly occurrence without duplicating the stored task', () => {
+    const task = makeTask({
+      id: 'monthly-fifth',
+      startDate: '2026-08-05',
+      dueDate: '2026-08-05',
+      scheduleType: 'monthly-date',
+    })
+    const layout = layoutCalendarTaskSegments([task], '2026-08-02', 42)
+
+    expect(layout.segments.map(({ taskId, occurrenceStart, segmentStart }) => ({
+      taskId,
+      occurrenceStart,
+      segmentStart,
+    }))).toEqual([
+      { taskId: task.id, occurrenceStart: '2026-08-05', segmentStart: '2026-08-05' },
+      { taskId: task.id, occurrenceStart: '2026-09-05', segmentStart: '2026-09-05' },
+    ])
+    expect(layout.dayCounts['2026-08-05']).toEqual({ total: 1, visible: 1, hidden: 0 })
+    expect(layout.dayCounts['2026-09-05']).toEqual({ total: 1, visible: 1, hidden: 0 })
+  })
 })

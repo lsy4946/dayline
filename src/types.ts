@@ -1,4 +1,10 @@
 export type TaskColor = 'coral' | 'violet' | 'sage' | 'blue' | 'amber'
+export type TaskScheduleType =
+  | 'normal'
+  | 'monthly-date'
+  | 'monthly-weekday'
+  | 'monthly-first'
+  | 'monthly-last'
 
 export interface SubTask {
   id: string
@@ -18,6 +24,9 @@ export interface Task {
   dueTime: string | null
   color: TaskColor
   tagId: string | null
+  /** Missing values from pre-v7 stores are treated as a normal one-time schedule. */
+  scheduleType?: TaskScheduleType
+  businessDay?: boolean
   position: number
   completed: boolean
   completedAt: string | null
@@ -71,6 +80,8 @@ export interface TaskTemplate {
   legacyColor: TaskColor
   durationDays: number
   subTaskTitles: string[]
+  scheduleType?: TaskScheduleType
+  businessDay?: boolean
   position: number
   createdAt: string
   updatedAt: string
@@ -101,6 +112,8 @@ export type TaskPatch = Partial<Pick<
   | 'dueTime'
   | 'color'
   | 'tagId'
+  | 'scheduleType'
+  | 'businessDay'
   | 'position'
   | 'completed'
   | 'completedAt'
@@ -144,6 +157,8 @@ export type TaskTemplatePatch = Partial<Pick<
   | 'legacyColor'
   | 'durationDays'
   | 'subTaskTitles'
+  | 'scheduleType'
+  | 'businessDay'
   | 'position'
   | 'updatedAt'
 >>

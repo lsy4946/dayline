@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from '../types'
-import { applyTaskEditChanges, createTaskFromTemplate, getTaskEditChanges, type TaskDraft } from './taskDraft'
+import {
+  applyTaskEditChanges,
+  createTaskFromTemplate,
+  createTaskTemplateFromTask,
+  getTaskEditChanges,
+  type TaskDraft,
+} from './taskDraft'
 
 const task: Task = {
   id: 'task-1',
@@ -177,6 +183,8 @@ describe('createTaskFromTemplate', () => {
       legacyColor: 'blue',
       durationDays: 3,
       subTaskTitles: ['첫 단계', '둘째 단계'],
+      scheduleType: 'monthly-last',
+      businessDay: true,
       position: 0,
       createdAt: '2026-08-01T00:00:00.000Z',
       updatedAt: '2026-08-01T00:00:00.000Z',
@@ -189,10 +197,33 @@ describe('createTaskFromTemplate', () => {
       tagId: 'builtin-blue',
       color: 'blue',
       position: 4,
+      scheduleType: 'monthly-last',
+      businessDay: true,
     })
     expect(created.subTasks.map(({ id, title }) => ({ id, title }))).toEqual([
       { id: 'child-one', title: '첫 단계' },
       { id: 'child-two', title: '둘째 단계' },
     ])
+  })
+
+  it('captures the whole task form as a reusable template', () => {
+    const template = createTaskTemplateFromTask({
+      ...task,
+      startDate: '2026-08-11',
+      dueDate: '2026-08-13',
+      scheduleType: 'monthly-weekday',
+      businessDay: false,
+    }, 5, new Date('2026-08-14T00:00:00.000Z'), () => 'copied-template')
+
+    expect(template).toMatchObject({
+      id: 'copied-template',
+      title: task.title,
+      note: task.note,
+      durationDays: 3,
+      subTaskTitles: ['기존 하위 일정'],
+      scheduleType: 'monthly-weekday',
+      businessDay: false,
+      position: 5,
+    })
   })
 })

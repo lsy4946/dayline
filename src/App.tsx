@@ -59,6 +59,7 @@ import {
   fromDateKey,
   getWeekendKey,
   inclusiveDateKeys,
+  isDateKey,
   shiftMonth,
   startOfMonth,
   todayKey,
@@ -73,8 +74,10 @@ import {
 } from './domain/dailyNotes'
 import { getCalendarDayTone, getKoreanHoliday } from './domain/koreanHolidays'
 import { parseReleaseNotes } from './domain/releaseNotes'
+import { normalizeTaskScheduleType } from './domain/taskSchedule'
 import {
   advanceTaskState,
+  copyTaskToDate,
   deletedTasks,
   moveTaskRange,
   remainingRetentionDays,
@@ -91,6 +94,7 @@ import {
 } from './domain/tasks'
 import {
   applyTaskEditChanges,
+  createTaskTemplateFromTask,
   createTaskFromTemplate,
   getTaskEditChanges,
   type TaskDraft,
@@ -106,6 +110,7 @@ import type {
   SubTask,
   Task,
   TaskColor,
+  TaskScheduleType,
   TaskTag,
   TaskTemplate,
   UpdateState,
@@ -122,6 +127,13 @@ interface ToastMessage {
 }
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
+const TASK_SCHEDULE_OPTIONS: Array<{ value: TaskScheduleType; label: string }> = [
+  { value: 'normal', label: '일반 일정' },
+  { value: 'monthly-date', label: '일자 고정' },
+  { value: 'monthly-weekday', label: '요일 고정' },
+  { value: 'monthly-first', label: '초일 일정' },
+  { value: 'monthly-last', label: '말일 일정' },
+]
 const TAG_PALETTE = ['#ef6f61', '#8b6fd6', '#6f9f7d', '#4f86c6', '#d99a32', '#d66787', '#3f9b96', '#5c6ac4', '#718096']
 const LEGACY_COLORS: Record<TaskColor, string> = {
   coral: '#ec6d5c',
@@ -169,6 +181,7 @@ function getRendererUpdatesApi() {
 interface TaskDateDragPayload {
   taskId: string
   grabDate: string
+  copy?: boolean
 }
 
 interface TemplateDraft {
@@ -179,6 +192,43 @@ interface TemplateDraft {
   legacyColor: TaskColor
   durationDays: number
   subTaskTitles: string[]
+  scheduleType: TaskScheduleType
+  businessDay: boolean
+}
+
+function taskScheduleDescription(
+  scheduleType: TaskScheduleType,
+  startDate: string,
+  businessDay: boolean,
+): string {
+  if (!isDateKey(startDate)) return '날짜를 선택하면 반복 기준을 알려드려요.'
+  if (scheduleType === 'monthly-date') {
+    return `매달 ${fromDateKey(startDate).getDate()}일에 반복돼요. 해당 일자가 없는 달은 건너뜁니다.`
+  }
+  if (scheduleType === 'monthly-weekday') {
+    const anchor = fromDateKey(startDate)
+    const occurrence = Math.floor((anchor.getDate() - 1) / 7) + 1
+    return `매달 ${occurrence}번째 ${WEEKDAYS[anchor.getDay()]}요일에 반복돼요. 해당 주차가 없는 달은 건너뜁니다.`
+  }
+  if (scheduleType === 'monthly-first') {
+    return businessDay ? '매달 첫 번째 영업일에 반복돼요.' : '매달 1일에 반복돼요.'
+  }
+  if (scheduleType === 'monthly-last') {
+    return businessDay ? '매달 마지막 영업일에 반복돼요.' : '매달 말일에 반복돼요.'
+  }
+  return '선택한 시작일부터 마감일까지 한 번만 표시돼요.'
+}
+
+function templateScheduleDescription(scheduleType: TaskScheduleType, businessDay: boolean): string {
+  if (scheduleType === 'monthly-date') return '캘린더에 놓은 날짜의 일자로 매달 반복돼요.'
+  if (scheduleType === 'monthly-weekday') return '캘린더에 놓은 날짜의 주차와 요일로 매달 반복돼요.'
+  if (scheduleType === 'monthly-first') {
+    return businessDay ? '매달 첫 번째 영업일에 반복돼요.' : '매달 1일에 반복돼요.'
+  }
+  if (scheduleType === 'monthly-last') {
+    return businessDay ? '매달 마지막 영업일에 반복돼요.' : '매달 말일에 반복돼요.'
+  }
+  return '날짜는 캘린더에 템플릿을 놓을 때 정해져요.'
 }
 
 const MAIN_HELP_STEPS: HelpTourStep[] = [
@@ -229,6 +279,7 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     ),
     tips: [
       '일정 바 본문을 다른 날짜로 끌면 기간은 그대로 유지한 채 날짜를 옮길 수 있어요.',
+      'Ctrl을 누른 채 일정 바를 끌면 원본은 그대로 두고 놓은 날짜에 새 일정으로 복사됩니다.',
       '오른쪽 손잡이에 키보드 포커스를 둔 뒤 Alt + ↑/↓를 누르면 표시 순서만 바뀝니다.',
     ],
   },
@@ -236,13 +287,16 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     target: 'create-task',
     eyebrow: '일정 만들기와 상세',
     title: '큰 일정을 세부 할 일로 나눠 관리해요',
-    description: '제목과 기간은 필수이고 시간·메모·태그·세부 할 일은 선택이에요. 세부 할 일을 모두 끝내면 상위 일정도 자동으로 비활성화됩니다.',
+    description: '제목과 기간을 정한 뒤 일반·일자 고정·요일 고정·초일·말일 중 일정 방식을 선택할 수 있어요. 초일과 말일은 영업일 기준으로도 계산됩니다.',
     example: (
       <div className="help-example-subtasks">
         <strong>발표 준비</strong><span><i className="is-done">✓</i> 자료 조사</span><span><i /> 슬라이드 검토</span><small>1 / 2 완료</small>
       </div>
     ),
-    tips: ['기존 일정의 내용과 상태 변경은 상세 화면에서 변경 저장을 눌러야 반영돼요.'],
+    tips: [
+      '세부 할 일을 모두 끝내면 상위 일정도 자동으로 비활성화됩니다.',
+      '기존 일정의 내용과 상태 변경은 상세 화면에서 변경 저장을 눌러야 반영돼요.',
+    ],
   },
   {
     target: 'search',
@@ -292,10 +346,11 @@ const MAIN_HELP_STEPS: HelpTourStep[] = [
     target: 'templates',
     eyebrow: '반복 일정',
     title: '자주 쓰는 일정은 템플릿으로 저장하세요',
-    description: '추가 버튼으로 양식을 열어 반복 일정을 만들고, 카드 본문을 캘린더로 끌거나 오른쪽 손잡이로 목록 순서를 바꿀 수 있어요.',
+    description: '추가 버튼으로 직접 양식을 만들거나 캘린더 일정을 열린 왼쪽 메뉴 바에 놓아 양식 그대로 보관하세요. 카드 본문은 다시 캘린더로 끌어 사용할 수 있어요.',
     example: (
       <div className="help-example-template"><Repeat2 size={16} /><div><strong>주간 회고 · 1일</strong><span>캘린더로 드래그해 생성</span></div><b>추가</b></div>
     ),
+    tips: ['일정을 메뉴 바나 열린 반복 일정 패널에 놓으면 메모·기간·시간·태그·세부 할 일·일정 방식이 함께 저장됩니다.'],
   },
   {
     target: 'filters',
@@ -348,7 +403,7 @@ const WIDGET_HELP_STEPS: HelpTourStep[] = [
     eyebrow: '위젯 둘러보기',
     title: '일정과 퀵 노트를 바탕화면 가까이에',
     description: '작은 위젯에서도 날짜 선택, 일정·세부 할 일, 퀵 노트를 함께 관리할 수 있어요.',
-    example: <div className="help-example-widget"><BrandMark compact /><div><strong>Dayline 0.3.41 위젯</strong><span>메인 캘린더와 실시간 동기화</span></div></div>,
+    example: <div className="help-example-widget"><BrandMark compact /><div><strong>Dayline 0.4.0 위젯</strong><span>메인 캘린더와 실시간 동기화</span></div></div>,
   },
   {
     target: 'widget-controls',
@@ -521,7 +576,7 @@ function parseTaskDateDragPayload(raw: string): TaskDateDragPayload | null {
   try {
     const value = JSON.parse(raw) as Partial<TaskDateDragPayload>
     return typeof value.taskId === 'string' && typeof value.grabDate === 'string'
-      ? { taskId: value.taskId, grabDate: value.grabDate }
+      ? { taskId: value.taskId, grabDate: value.grabDate, copy: value.copy === true }
       : null
   } catch {
     return null
@@ -872,14 +927,14 @@ function TaskChip({
   task: Task
   tags: TaskTag[]
   segment: CalendarTaskSegment
-  onOpen: (task: Task) => void
+  onOpen: (task: Task, occurrenceStart?: string, occurrenceEnd?: string) => void
   onSecondaryAction: (id: string) => void
   onMove: (id: string, direction: ReorderDirection) => void
   onDropTask: (draggedId: string, targetId: string) => void
   onDropTemplate: (templateId: string, clientX: number, clientY: number) => void
-  onBeginDateDrag: (taskId: string, fallbackDate: string, clientX: number, clientY: number, transfer: DataTransfer) => void
+  onBeginDateDrag: (taskId: string, fallbackDate: string, clientX: number, clientY: number, copy: boolean, transfer: DataTransfer) => void
   onEndDateDrag: () => void
-  onDropDateMove: (payload: TaskDateDragPayload, clientX: number, clientY: number) => void
+  onDropDateMove: (payload: TaskDateDragPayload, clientX: number, clientY: number, copy: boolean) => void
 }) {
   const suppressOpenRef = useRef(false)
   const segmentStyle = {
@@ -895,6 +950,8 @@ function TaskChip({
       data-qa="calendar-task-segment"
       data-task-start={task.startDate}
       data-task-end={task.dueDate}
+      data-occurrence-start={segment.occurrenceStart}
+      data-occurrence-end={segment.occurrenceEnd}
       data-segment-start={segment.segmentStart}
       data-segment-end={segment.segmentEnd}
       data-week-row={segment.weekRow}
@@ -908,7 +965,7 @@ function TaskChip({
         if (types.includes(TASK_DATE_MOVE_MIME)) {
           event.preventDefault()
           event.stopPropagation()
-          event.dataTransfer.dropEffect = 'move'
+          event.dataTransfer.dropEffect = event.ctrlKey ? 'copy' : 'move'
         } else if (types.includes(CALENDAR_ORDER_MIME)) {
           event.preventDefault()
           event.stopPropagation()
@@ -924,7 +981,7 @@ function TaskChip({
         if (dateMove) {
           event.preventDefault()
           event.stopPropagation()
-          onDropDateMove(dateMove, event.clientX, event.clientY)
+          onDropDateMove(dateMove, event.clientX, event.clientY, event.ctrlKey)
           return
         }
         const draggedTaskId = event.dataTransfer.getData(CALENDAR_ORDER_MIME)
@@ -940,7 +997,7 @@ function TaskChip({
         event.stopPropagation()
         onDropTemplate(templateId, event.clientX, event.clientY)
       }}
-      title={`${task.title} · 좌클릭 상세 보기 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
+      title={`${task.title} · 드래그하여 날짜 이동 · Ctrl+드래그하여 복사 · 우클릭 ${task.completed ? '최근 삭제로 이동' : '비활성화'}`}
     >
       <button
         type="button"
@@ -951,13 +1008,13 @@ function TaskChip({
         onClick={(event) => {
           event.stopPropagation()
           if (suppressOpenRef.current) return
-          onOpen(task)
+          onOpen(task, segment.occurrenceStart, segment.occurrenceEnd)
         }}
         onDragStart={(event) => {
           event.stopPropagation()
           suppressOpenRef.current = true
-          event.dataTransfer.effectAllowed = 'move'
-          onBeginDateDrag(task.id, segment.segmentStart, event.clientX, event.clientY, event.dataTransfer)
+          event.dataTransfer.effectAllowed = 'copyMove'
+          onBeginDateDrag(task.id, segment.segmentStart, event.clientX, event.clientY, event.ctrlKey, event.dataTransfer)
         }}
         onDragEnd={(event) => {
           event.stopPropagation()
@@ -1417,6 +1474,8 @@ function TaskModal({
   const [dueTime, setDueTime] = useState('09:00')
   const [color, setColor] = useState<TaskColor>('coral')
   const [tagId, setTagId] = useState<string | null>(null)
+  const [scheduleType, setScheduleType] = useState<TaskScheduleType>('normal')
+  const [businessDay, setBusinessDay] = useState(false)
   const [completed, setCompleted] = useState(false)
   const [parentStateTouched, setParentStateTouched] = useState(false)
   const [subTasks, setSubTasks] = useState<SubTask[]>([])
@@ -1439,6 +1498,8 @@ function TaskModal({
     dueTime: null,
     color: 'coral' as TaskColor,
     tagId: defaultTagId,
+    scheduleType: 'normal',
+    businessDay: false,
     subTasks: [],
     completed: false,
   })
@@ -1471,6 +1532,8 @@ function TaskModal({
       dueTime: task?.dueTime ?? null,
       color: task?.color ?? 'coral',
       tagId: task?.tagId ?? defaultTagId,
+      scheduleType: normalizeTaskScheduleType(task?.scheduleType),
+      businessDay: task?.businessDay === true,
       subTasks: openingSubTasks,
       completed: task?.completed ?? false,
     }
@@ -1482,6 +1545,8 @@ function TaskModal({
     setDueTime(openingDraft.dueTime ?? '09:00')
     setColor(openingDraft.color)
     setTagId(openingDraft.tagId)
+    setScheduleType(normalizeTaskScheduleType(openingDraft.scheduleType))
+    setBusinessDay(openingDraft.businessDay === true)
     setCompleted(openingDraft.completed)
     setParentStateTouched(false)
     setSubTasks(openingSubTasks)
@@ -1490,7 +1555,11 @@ function TaskModal({
     setConfirmUnsaved(false)
     saveInProgressRef.current = false
     draftBaselineRef.current = openingDraft
-    const timer = window.setTimeout(() => titleInputRef.current?.focus(), 90)
+    const timer = window.setTimeout(() => {
+      const activeElement = document.activeElement
+      if (activeElement instanceof HTMLElement && backdropRef.current?.contains(activeElement)) return
+      titleInputRef.current?.focus()
+    }, 90)
     return () => window.clearTimeout(timer)
     // Initialize once per open editor session. Store broadcasts for the same task
     // must not replace a draft while the user is composing it.
@@ -1538,6 +1607,8 @@ function TaskModal({
     || (timeEnabled ? dueTime : null) !== baseline.dueTime
     || color !== baseline.color
     || tagId !== baseline.tagId
+    || scheduleType !== normalizeTaskScheduleType(baseline.scheduleType)
+    || businessDay !== (baseline.businessDay === true)
     || completed !== baseline.completed
     || subTasksDirty
     || Boolean(newSubTaskTitle.trim())
@@ -1566,6 +1637,9 @@ function TaskModal({
       dueTime: timeEnabled ? dueTime : null,
       color,
       tagId,
+      scheduleType,
+      businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+        && businessDay,
       subTasks: nextSubTasks.map((subTask) => ({ ...subTask, title: subTask.title.trim() })),
     }
     const editChanges = task
@@ -1921,8 +1995,48 @@ function TaskModal({
             </div>
           </fieldset>
 
+          <fieldset className="schedule-picker" data-qa="task-schedule-picker">
+            <legend><Repeat2 size={14} aria-hidden="true" /> 일정 방식</legend>
+            <div className="schedule-picker-options" role="radiogroup" aria-label="일정 방식">
+              {TASK_SCHEDULE_OPTIONS.map((option) => (
+                <button
+                  type="button"
+                  key={option.value}
+                  data-schedule-type={option.value}
+                  className={scheduleType === option.value ? 'is-selected' : ''}
+                  onClick={() => {
+                    setScheduleType(option.value)
+                    if (option.value !== 'monthly-first' && option.value !== 'monthly-last') {
+                      setBusinessDay(false)
+                    }
+                  }}
+                  aria-pressed={scheduleType === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {(scheduleType === 'monthly-first' || scheduleType === 'monthly-last') && (
+              <button
+                type="button"
+                className="business-day-toggle"
+                role="switch"
+                aria-checked={businessDay}
+                onClick={() => setBusinessDay((current) => !current)}
+              >
+                <span className="switch-track"><span /></span>
+                <span>
+                  <strong>영업일 기준</strong>
+                  <small>토·일요일과 공휴일을 제외해 계산해요.</small>
+                </span>
+              </button>
+            )}
+          </fieldset>
+
           <footer className="modal-footer">
-            <span>{task ? '내용과 상태 변경은 저장 버튼을 눌러 반영해요.' : '날짜만 선택해도 바로 저장할 수 있어요.'}</span>
+            <span data-qa="task-schedule-description">
+              {taskScheduleDescription(scheduleType, startDate, businessDay)}
+            </span>
             <div>
               <button type="button" className="secondary-button" onClick={onClose}>취소</button>
               <button
@@ -3105,6 +3219,8 @@ function TemplateModal({
   const [dueTime, setDueTime] = useState('09:00')
   const [tagId, setTagId] = useState<string | null>(defaultTag?.id ?? null)
   const [legacyColor, setLegacyColor] = useState<TaskColor>(defaultTag?.legacyColor ?? 'coral')
+  const [scheduleType, setScheduleType] = useState<TaskScheduleType>('normal')
+  const [businessDay, setBusinessDay] = useState(false)
   const [confirmUnsaved, setConfirmUnsaved] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
   const backdropRef = useRef<HTMLDivElement>(null)
@@ -3120,6 +3236,8 @@ function TemplateModal({
     legacyColor: defaultTag?.legacyColor ?? 'coral',
     durationDays: 1,
     subTaskTitles: [],
+    scheduleType: 'normal',
+    businessDay: false,
   })
 
   const editorSession = open ? template?.id ?? '__new-template__' : null
@@ -3134,6 +3252,8 @@ function TemplateModal({
       legacyColor: template?.legacyColor ?? defaultTag?.legacyColor ?? 'coral',
       durationDays: clamp(Math.round(template?.durationDays ?? 1), 1, 365),
       subTaskTitles: (template?.subTaskTitles ?? []).map((item) => item.trim()).filter(Boolean),
+      scheduleType: normalizeTaskScheduleType(template?.scheduleType),
+      businessDay: template?.businessDay === true,
     }
     setTitle(openingDraft.title)
     setNote(openingDraft.note)
@@ -3143,6 +3263,8 @@ function TemplateModal({
     setDueTime(openingDraft.dueTime ?? '09:00')
     setTagId(openingDraft.tagId)
     setLegacyColor(openingDraft.legacyColor)
+    setScheduleType(openingDraft.scheduleType)
+    setBusinessDay(openingDraft.businessDay)
     setConfirmUnsaved(false)
     saveInProgressRef.current = false
     draftBaselineRef.current = openingDraft
@@ -3190,6 +3312,9 @@ function TemplateModal({
     legacyColor,
     durationDays: clamp(Math.round(durationDays), 1, 365),
     subTaskTitles: subTaskText.split('\n').map((item) => item.trim()).filter(Boolean),
+    scheduleType,
+    businessDay: (scheduleType === 'monthly-first' || scheduleType === 'monthly-last')
+      && businessDay,
   }
   const baseline = draftBaselineRef.current
   const draftDirty = currentDraft.title !== baseline.title.trim()
@@ -3198,6 +3323,8 @@ function TemplateModal({
     || currentDraft.tagId !== baseline.tagId
     || currentDraft.legacyColor !== baseline.legacyColor
     || currentDraft.durationDays !== baseline.durationDays
+    || currentDraft.scheduleType !== normalizeTaskScheduleType(baseline.scheduleType)
+    || currentDraft.businessDay !== (baseline.businessDay === true)
     || currentDraft.subTaskTitles.length !== baseline.subTaskTitles.length
     || currentDraft.subTaskTitles.some((item, index) => item !== baseline.subTaskTitles[index])
   const validDraft = Boolean(currentDraft.title)
@@ -3358,8 +3485,46 @@ function TemplateModal({
             </div>
           </fieldset>
 
+          <fieldset className="schedule-picker" data-qa="template-schedule-picker">
+            <legend><Repeat2 size={14} aria-hidden="true" /> 일정 방식</legend>
+            <div className="schedule-picker-options" role="radiogroup" aria-label="템플릿 일정 방식">
+              {TASK_SCHEDULE_OPTIONS.map((option) => (
+                <button
+                  type="button"
+                  key={option.value}
+                  data-schedule-type={option.value}
+                  className={scheduleType === option.value ? 'is-selected' : ''}
+                  onClick={() => {
+                    setScheduleType(option.value)
+                    if (option.value !== 'monthly-first' && option.value !== 'monthly-last') {
+                      setBusinessDay(false)
+                    }
+                  }}
+                  aria-pressed={scheduleType === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {(scheduleType === 'monthly-first' || scheduleType === 'monthly-last') && (
+              <button
+                type="button"
+                className="business-day-toggle"
+                role="switch"
+                aria-checked={businessDay}
+                onClick={() => setBusinessDay((current) => !current)}
+              >
+                <span className="switch-track"><span /></span>
+                <span>
+                  <strong>영업일 기준</strong>
+                  <small>토·일요일과 공휴일을 제외해 계산해요.</small>
+                </span>
+              </button>
+            )}
+          </fieldset>
+
           <footer className="modal-footer">
-            <span>날짜는 캘린더에 템플릿을 놓을 때 정해져요.</span>
+            <span>{templateScheduleDescription(scheduleType, businessDay)}</span>
             <div>
               <button type="button" className="secondary-button" data-qa="template-form-cancel" onClick={onClose}>취소</button>
               <button type="submit" className="primary-button" disabled={!validDraft}>
@@ -3446,10 +3611,12 @@ function TemplatePanel({
   onInstantiate,
   onReorder,
   calendarDragging,
+  taskDragging,
   onCreateRequest,
   onEditRequest,
   onCalendarDragStart,
   onCalendarDragEnd,
+  onTaskDrop,
   onClose,
 }: {
   templates: TaskTemplate[]
@@ -3459,10 +3626,12 @@ function TemplatePanel({
   onInstantiate: (id: string, startDate: string) => boolean
   onReorder: (orderedIds: string[]) => boolean
   calendarDragging: boolean
+  taskDragging: boolean
   onCreateRequest: () => void
   onEditRequest: (template: TaskTemplate) => void
   onCalendarDragStart: (templateId: string) => void
   onCalendarDragEnd: () => void
+  onTaskDrop: (payload: TaskDateDragPayload) => void
   onClose: () => void
 }) {
   const orderedTemplates = useMemo(() => sortedPositioned(templates), [templates])
@@ -3473,8 +3642,21 @@ function TemplatePanel({
       className="rail-flyout is-wide"
       data-qa="template-panel"
       data-calendar-dragging={calendarDragging || undefined}
+      data-calendar-task-dragging={taskDragging || undefined}
       aria-hidden={calendarDragging || undefined}
       aria-labelledby="rail-action-templates"
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes(TASK_DATE_MOVE_MIME)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(event) => {
+        const payload = parseTaskDateDragPayload(event.dataTransfer.getData(TASK_DATE_MOVE_MIME))
+        if (!payload) return
+        event.preventDefault()
+        event.stopPropagation()
+        onTaskDrop(payload)
+      }}
     >
       <header className="flyout-header">
         <div><span className="eyebrow">TEMPLATES</span><h2>반복 일정</h2></div>
@@ -3497,6 +3679,9 @@ function TemplatePanel({
           {orderedTemplates.map((template) => {
             const tag = tags.find((item) => item.id === template.tagId)
             const rawColor = normalizedHex(tag?.color ?? LEGACY_COLORS[template.legacyColor])
+            const scheduleLabel = TASK_SCHEDULE_OPTIONS.find(
+              (option) => option.value === normalizeTaskScheduleType(template.scheduleType),
+            )?.label ?? '일반 일정'
             return (
               <article
                 key={template.id}
@@ -3531,7 +3716,7 @@ function TemplatePanel({
                   onDragEnd={onCalendarDragEnd}
                 >
                   <CalendarDays size={15} aria-hidden="true" />
-                  <div><strong>{template.title}</strong><span>{template.durationDays}일{tag ? ` · ${tag.name}` : ''}{template.dueTime ? ` · ${template.dueTime}` : ''}</span></div>
+                  <div><strong>{template.title}</strong><span>{template.durationDays}일 · {scheduleLabel}{tag ? ` · ${tag.name}` : ''}{template.dueTime ? ` · ${template.dueTime}` : ''}</span></div>
                 </div>
                 <button type="button" onClick={() => onInstantiate(template.id, selectedDate)}>선택 날짜에 추가</button>
                 <IconButton
@@ -3574,6 +3759,7 @@ interface SharedViewProps {
   onDailyNoteDelete: (id: string) => void
   onTaskReorder: (orderedIds: string[]) => boolean
   onTaskDateMove: (id: string, targetStart: string) => Task | null
+  onTaskDateCopy: (id: string, targetStart: string) => Task | null
   onDailyNoteReorder: (orderedIds: string[], selectedDate: string) => boolean
   onSettingsChange: (changes: Partial<AppSettings>) => boolean
   onTagCreate: (name: string, color: string) => boolean
@@ -3583,6 +3769,7 @@ interface SharedViewProps {
   onTemplateDelete: (id: string) => boolean
   onTemplateInstantiate: (id: string, startDate: string) => boolean
   onTemplateReorder: (orderedIds: string[]) => boolean
+  onTaskTemplateCreate: (taskId: string) => boolean
   onCreate: (draft: TaskDraft) => boolean
   onUpdate: (id: string, changes: TaskEditChanges) => boolean
 }
@@ -3608,6 +3795,7 @@ function MainView(props: SharedViewProps) {
     onDailyNoteDelete,
     onTaskReorder,
     onTaskDateMove,
+    onTaskDateCopy,
     onDailyNoteReorder,
     onSettingsChange,
     onTagCreate,
@@ -3617,6 +3805,7 @@ function MainView(props: SharedViewProps) {
     onTemplateDelete,
     onTemplateInstantiate,
     onTemplateReorder,
+    onTaskTemplateCreate,
     onCreate,
     onUpdate,
   } = props
@@ -3636,6 +3825,8 @@ function MainView(props: SharedViewProps) {
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<TaskTemplate | null>(null)
   const [templateCalendarDragging, setTemplateCalendarDragging] = useState(false)
+  const [calendarTaskDragging, setCalendarTaskDragging] = useState(false)
+  const [taskTemplateDropHover, setTaskTemplateDropHover] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [updateState, setUpdateState] = useState<UpdateState>(UNSUPPORTED_UPDATE_STATE)
   const [updatePromptOpen, setUpdatePromptOpen] = useState(false)
@@ -4051,9 +4242,13 @@ function MainView(props: SharedViewProps) {
     setModalOpen(true)
   }
 
-  const openTask = (task: Task) => {
-    setSelectedDate(task.startDate)
-    setSelectedRange({ startDate: task.startDate, endDate: task.dueDate })
+  const openTask = (
+    task: Task,
+    occurrenceStart = task.startDate,
+    occurrenceEnd = task.dueDate,
+  ) => {
+    setSelectedDate(occurrenceStart)
+    setSelectedRange({ startDate: occurrenceStart, endDate: occurrenceEnd })
     setEditingTask(task)
     setModalOpen(true)
   }
@@ -4203,17 +4398,24 @@ function MainView(props: SharedViewProps) {
     fallbackDate: string,
     clientX: number,
     clientY: number,
+    copy: boolean,
     transfer: DataTransfer,
   ) => {
     const task = calendarTaskById.get(taskId)
     if (!task) return
     const grabDate = calendarDateAtPoint(clientX, clientY) ?? fallbackDate
-    transfer.setData(TASK_DATE_MOVE_MIME, JSON.stringify({ taskId, grabDate }))
+    transfer.setData(TASK_DATE_MOVE_MIME, JSON.stringify({ taskId, grabDate, copy }))
+    setCalendarTaskDragging(true)
+  }
+  const endTaskDateDrag = () => {
+    setCalendarTaskDragging(false)
+    setTaskTemplateDropHover(false)
   }
   const dropTaskDateAtCalendarPoint = (
     payload: TaskDateDragPayload,
     clientX: number,
     clientY: number,
+    copyRequested: boolean,
   ) => {
     const targetDate = calendarDateAtPoint(clientX, clientY)
     const task = tasks.find((item) => item.id === payload.taskId && !item.deletedAt)
@@ -4222,10 +4424,18 @@ function MainView(props: SharedViewProps) {
     if (!targetDate || !task || grabIndex < 0 || targetIndex < 0) return
     const dayOffset = targetIndex - grabIndex
     const targetStart = addDaysKey(task.startDate, dayOffset)
-    const moved = onTaskDateMove(task.id, targetStart)
-    if (!moved) return
+    const result = payload.copy || copyRequested
+      ? onTaskDateCopy(task.id, targetStart)
+      : onTaskDateMove(task.id, targetStart)
+    endTaskDateDrag()
+    if (!result) return
     setSelectedDate(targetDate)
-    setSelectedRange({ startDate: moved.startDate, endDate: moved.dueDate })
+    setSelectedRange({ startDate: result.startDate, endDate: result.dueDate })
+  }
+  const dropTaskAsTemplate = (payload: TaskDateDragPayload) => {
+    const saved = onTaskTemplateCreate(payload.taskId)
+    endTaskDateDrag()
+    if (saved) setRailPanel('templates')
   }
   const reorderNotesByDrop = (draggedId: string, targetId: string) => {
     onDailyNoteReorder(
@@ -4259,7 +4469,26 @@ function MainView(props: SharedViewProps) {
         className="side-rail"
         data-qa="side-rail"
         data-state={railCollapsed ? 'closed' : 'open'}
+        data-calendar-task-dragging={calendarTaskDragging || undefined}
+        data-task-template-drop-hover={taskTemplateDropHover || undefined}
         hidden={railCollapsed}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes(TASK_DATE_MOVE_MIME)) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+          setTaskTemplateDropHover(true)
+        }}
+        onDragLeave={(event) => {
+          if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+          setTaskTemplateDropHover(false)
+        }}
+        onDrop={(event) => {
+          const payload = parseTaskDateDragPayload(event.dataTransfer.getData(TASK_DATE_MOVE_MIME))
+          if (!payload) return
+          event.preventDefault()
+          event.stopPropagation()
+          dropTaskAsTemplate(payload)
+        }}
       >
         <button
           type="button"
@@ -4415,6 +4644,7 @@ function MainView(props: SharedViewProps) {
           onInstantiate={onTemplateInstantiate}
           onReorder={onTemplateReorder}
           calendarDragging={templateCalendarDragging}
+          taskDragging={calendarTaskDragging}
           onCreateRequest={() => {
             setEditingTemplate(null)
             setTemplateModalOpen(true)
@@ -4442,6 +4672,7 @@ function MainView(props: SharedViewProps) {
             setTemplateCalendarDragging(false)
             setRailPanel('templates')
           }}
+          onTaskDrop={dropTaskAsTemplate}
           onClose={closeRailPanel}
         />
       )}
@@ -4637,14 +4868,16 @@ function MainView(props: SharedViewProps) {
                     if (!event.dataTransfer.types.includes(TEMPLATE_COPY_MIME)
                       && !event.dataTransfer.types.includes(TASK_DATE_MOVE_MIME)) return
                     event.preventDefault()
-                    event.dataTransfer.dropEffect = event.dataTransfer.types.includes(TASK_DATE_MOVE_MIME) ? 'move' : 'copy'
+                    event.dataTransfer.dropEffect = event.dataTransfer.types.includes(TASK_DATE_MOVE_MIME)
+                      ? event.ctrlKey ? 'copy' : 'move'
+                      : 'copy'
                   }}
                   onDrop={(event) => {
                     const taskDateMove = parseTaskDateDragPayload(event.dataTransfer.getData(TASK_DATE_MOVE_MIME))
                     if (taskDateMove) {
                       event.preventDefault()
                       event.stopPropagation()
-                      dropTaskDateAtCalendarPoint(taskDateMove, event.clientX, event.clientY)
+                      dropTaskDateAtCalendarPoint(taskDateMove, event.clientX, event.clientY, event.ctrlKey)
                       return
                     }
                     const templateId = event.dataTransfer.getData(TEMPLATE_COPY_MIME)
@@ -4689,7 +4922,7 @@ function MainView(props: SharedViewProps) {
                 if (!task) return null
                 return (
                   <TaskChip
-                    key={`${segment.taskId}:${segment.weekRow}`}
+                    key={`${segment.taskId}:${segment.occurrenceStart}:${segment.weekRow}`}
                     task={task}
                     tags={taskTags}
                     segment={segment}
@@ -4699,7 +4932,7 @@ function MainView(props: SharedViewProps) {
                     onDropTask={reorderCalendarTasksByDrop}
                     onDropTemplate={dropTemplateAtCalendarPoint}
                     onBeginDateDrag={beginTaskDateDrag}
-                    onEndDateDrag={() => undefined}
+                    onEndDateDrag={endTaskDateDrag}
                     onDropDateMove={dropTaskDateAtCalendarPoint}
                   />
                 )
@@ -5346,6 +5579,20 @@ export default function App({ mode }: { mode: AppMode }) {
     return moved
   }, [commit, showToast, storeRef])
 
+  const handleTaskDateCopy = useCallback((id: string, targetStart: string) => {
+    const source = storeRef.current.tasks.find((task) => task.id === id && !task.deletedAt)
+    if (!source) return null
+    const copied = copyTaskToDate(
+      source,
+      targetStart,
+      nextPosition(storeRef.current.tasks),
+    )
+    if (!copied) return null
+    if (!commit((current) => ({ ...current, tasks: [...current.tasks, copied] }))) return null
+    showToast(`${formatCompactDate(targetStart)}에 일정을 복사했어요.`)
+    return copied
+  }, [commit, showToast, storeRef])
+
   const handleDailyNoteReorder = useCallback((orderedIds: string[], selectedDate: string) => {
     if (orderedIds.length < 2) return true
     return commit((current) => ({
@@ -5423,6 +5670,9 @@ export default function App({ mode }: { mode: AppMode }) {
       note: draft.note.trim(),
       durationDays: clamp(Math.round(draft.durationDays), 1, 365),
       subTaskTitles: draft.subTaskTitles.map((title) => title.trim()).filter(Boolean),
+      scheduleType: normalizeTaskScheduleType(draft.scheduleType),
+      businessDay: (draft.scheduleType === 'monthly-first' || draft.scheduleType === 'monthly-last')
+        && draft.businessDay === true,
     }
     if (!safeDraft.title) return false
     if (id && !storeRef.current.taskTemplates.some((template) => template.id === id)) {
@@ -5442,6 +5692,12 @@ export default function App({ mode }: { mode: AppMode }) {
             if (!baseline || safeDraft.tagId !== baseline.tagId) patch.tagId = safeDraft.tagId
             if (!baseline || safeDraft.legacyColor !== baseline.legacyColor) patch.legacyColor = safeDraft.legacyColor
             if (!baseline || safeDraft.durationDays !== baseline.durationDays) patch.durationDays = safeDraft.durationDays
+            if (!baseline || safeDraft.scheduleType !== normalizeTaskScheduleType(baseline.scheduleType)) {
+              patch.scheduleType = safeDraft.scheduleType
+            }
+            if (!baseline || safeDraft.businessDay !== (baseline.businessDay === true)) {
+              patch.businessDay = safeDraft.businessDay
+            }
             if (!baseline || safeDraft.subTaskTitles.length !== baseline.subTaskTitles.length
               || safeDraft.subTaskTitles.some((title, index) => title !== baseline.subTaskTitles[index])) {
               patch.subTaskTitles = safeDraft.subTaskTitles
@@ -5466,6 +5722,21 @@ export default function App({ mode }: { mode: AppMode }) {
         })
     if (saved) showToast(id ? '반복 일정 템플릿을 수정했어요.' : '반복 일정 템플릿을 추가했어요.')
     return saved
+  }, [commit, showToast, storeRef])
+
+  const handleTaskTemplateCreate = useCallback((taskId: string) => {
+    const task = storeRef.current.tasks.find((item) => item.id === taskId && !item.deletedAt)
+    if (!task) return false
+    const template = createTaskTemplateFromTask(
+      task,
+      nextPosition(storeRef.current.taskTemplates),
+    )
+    if (!commit((current) => ({
+      ...current,
+      taskTemplates: [...current.taskTemplates, template],
+    }))) return false
+    showToast(`‘${task.title}’ 양식을 반복 일정에 보관했어요.`)
+    return true
   }, [commit, showToast, storeRef])
 
   const handleTemplateDelete = useCallback((id: string) => {
@@ -5519,6 +5790,7 @@ export default function App({ mode }: { mode: AppMode }) {
     onDailyNoteDelete: handleDailyNoteDelete,
     onTaskReorder: handleTaskReorder,
     onTaskDateMove: handleTaskDateMove,
+    onTaskDateCopy: handleTaskDateCopy,
     onDailyNoteReorder: handleDailyNoteReorder,
     onSettingsChange: handleSettingsChange,
     onTagCreate: handleTagCreate,
@@ -5528,6 +5800,7 @@ export default function App({ mode }: { mode: AppMode }) {
     onTemplateDelete: handleTemplateDelete,
     onTemplateInstantiate: handleTemplateInstantiate,
     onTemplateReorder: handleTemplateReorder,
+    onTaskTemplateCreate: handleTaskTemplateCreate,
     onCreate: handleCreate,
     onUpdate: handleUpdate,
   }

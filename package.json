@@ -1,6 +1,6 @@
 {
   "name": "dayline",
-  "version": "0.3.41",
+  "version": "0.4.0",
   "private": true,
   "description": "Calendar-first offline todo widget for Windows",
   "author": "Dayline",
@@ -48,7 +48,7 @@
   "build": {
     "appId": "com.dayline.desktop",
     "productName": "Dayline",
-    "buildNumber": "2",
+    "buildNumber": "1",
     "asar": true,
     "directories": {
       "output": "release",
